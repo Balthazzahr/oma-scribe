@@ -317,7 +317,7 @@ def start_recording(mode="meeting", title="", metadata=None):
     notify("Recording Started", f"Folder: {safe_folder_name}")
     return {"status": "ok", "state": state}
 
-def stop_recording():
+def stop_recording(metadata=None):
     state = get_state()
     if not state.get("is_recording"):
         return {"status": "error", "message": "Not recording"}
@@ -334,10 +334,49 @@ def stop_recording():
     mode = state.get("mode", "meeting")
     title = state.get("title", "")
 
+    meta_obj = {}
+    if metadata:
+        if isinstance(metadata, str):
+            try:
+                meta_obj = json.loads(metadata)
+            except Exception:
+                meta_obj = {"title": metadata}
+        elif isinstance(metadata, dict):
+            meta_obj = metadata
+
+    if meta_obj.get("title") and meta_obj["title"].strip():
+        title = meta_obj["title"].strip()
+
+    if audio_file and os.path.exists(audio_file):
+        note_dir = Path(audio_file).parent
+        # Merge live fields entered during active recording
+        existing_meta = load_note_metadata(note_dir)
+        existing_meta.update(meta_obj)
+        if title:
+            existing_meta["title"] = title
+        save_note_metadata(note_dir, existing_meta)
+
+        # If title is provided, rename folder accordingly
+        if title and title not in ("Meeting", "Voice Memo"):
+            date_time_str = existing_meta.get("date_time_str") or format_folder_datetime(datetime.fromtimestamp(note_dir.stat().st_mtime))
+            expected_folder_name = f"{title} - {date_time_str}"
+            safe_expected = "".join(c for c in expected_folder_name if c not in r'\/<>:"|?*').strip()
+            storage = get_storage_path()
+            if note_dir.parent == storage and note_dir.name != safe_expected:
+                new_note_dir = storage / safe_expected
+                try:
+                    note_dir.rename(new_note_dir)
+                    note_dir = new_note_dir
+                    audio_file = str(note_dir / Path(audio_file).name)
+                except Exception:
+                    pass
+
     state.update({
         "is_recording": False,
         "pid": None,
-        "status_message": "Recording saved"
+        "status_message": "Recording saved",
+        "current_audio_file": audio_file,
+        "title": title
     })
     save_state(state)
 
@@ -346,13 +385,13 @@ def stop_recording():
         notify("Recording Saved", f"Saved to {folder_name}")
 
     settings = load_settings()
-    # Auto-transcribe immediately if title was already provided prior to capture
+    # Auto-transcribe immediately if title was provided
     if settings.get("auto_transcribe_on_stop") and audio_file and os.path.exists(audio_file):
         if title and title.strip() and title not in ("Meeting", "Voice Memo"):
             subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "transcribe", audio_file, mode, title],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
-    return {"status": "ok", "audio_file": audio_file, "state": state}
+    return {"status": "ok", "audio_file": audio_file, "state": state, "title": title}
 
 # --- HTTP MULTIPART HELPER ---
 def post_multipart_file(url, api_key, file_path, fields):
@@ -1096,7 +1135,8 @@ def main():
             print(json.dumps(start_recording(mode, title)))
 
     elif cmd == "stop":
-        print(json.dumps(stop_recording()))
+        metadata_raw = sys.argv[2] if len(sys.argv) > 2 else ""
+        print(json.dumps(stop_recording(metadata_raw)))
 
     elif cmd == "status":
         print(json.dumps(get_state()))

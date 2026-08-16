@@ -154,11 +154,37 @@ BarWidget {
   }
 
   function stopRecord() {
-    var wasTitleSet = (root.selectedMode === "meeting" ? !!root.meetingTitleText.trim() : !!root.memoTitleText.trim())
+    var mode = root.selectedMode
+    var meta = {}
+
+    if (mode === "meeting") {
+      var attendees = []
+      for (var i = 0; i < attendeesModel.count; ++i) {
+        var item = attendeesModel.get(i)
+        if (item.name && item.name.trim()) {
+          attendees.push({ name: item.name.trim(), sex: (item.sex || "").trim() })
+        }
+      }
+
+      meta = {
+        title: root.meetingTitleText.trim(),
+        topics: root.meetingTopicsText.trim(),
+        attendees: attendees,
+        notes: root.meetingNotesText.trim()
+      }
+    } else {
+      meta = {
+        title: root.memoTitleText.trim(),
+        topics: root.memoTopicsText.trim(),
+        notes: root.memoNotesText.trim()
+      }
+    }
+
+    var wasTitleSet = !!meta.title
     var currentFile = root.stateObj.current_audio_file
     var currentMode = root.stateObj.mode || root.selectedMode
 
-    actionProc.command = ["python3", enginePath, "stop"]
+    actionProc.command = ["python3", enginePath, "stop", JSON.stringify(meta)]
     actionProc.running = true
 
     if (!wasTitleSet && currentFile) {
@@ -767,6 +793,46 @@ BarWidget {
               }
             }
           }
+          // Live In-Progress Context Banner
+          Rectangle {
+            visible: root.stateObj.is_recording
+            Layout.fillWidth: true
+            Layout.preferredHeight: 34
+            radius: 6
+            color: Util.alpha(Color.urgent, 0.12)
+            border.width: 1
+            border.color: Color.urgent
+
+            RowLayout {
+              anchors.fill: parent
+              anchors.margins: 8
+              spacing: 8
+
+              Rectangle {
+                width: 8
+                height: 8
+                radius: 4
+                color: Color.urgent
+
+                SequentialAnimation on opacity {
+                  running: root.stateObj.is_recording
+                  loops: Animation.Infinite
+                  NumberAnimation { from: 1.0; to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
+                  NumberAnimation { from: 0.25; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+                }
+              }
+
+              Text {
+                Layout.fillWidth: true
+                text: "Recording in progress (" + root.formatDuration(root.elapsedSeconds) + ") — Details entered below are linked to this active recording."
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: 11
+                color: Color.urgent
+                elide: Text.ElideRight
+              }
+            }
+          }
 
           // Top Mode Selector
           RowLayout {
@@ -805,7 +871,6 @@ BarWidget {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                enabled: !root.stateObj.is_recording
                 onClicked: root.selectedMode = "meeting"
               }
             }
@@ -842,7 +907,6 @@ BarWidget {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                enabled: !root.stateObj.is_recording
                 onClicked: root.selectedMode = "mic"
               }
             }
@@ -898,7 +962,6 @@ BarWidget {
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.foreground
-                      enabled: !root.stateObj.is_recording
                       text: root.meetingTitleText
                       onTextChanged: root.meetingTitleText = text
                       Keys.onTabPressed: mTopicsIn.forceActiveFocus()
@@ -942,7 +1005,6 @@ BarWidget {
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.foreground
-                      enabled: !root.stateObj.is_recording
                       text: root.meetingTopicsText
                       onTextChanged: root.meetingTopicsText = text
                       Keys.onTabPressed: {
@@ -998,18 +1060,16 @@ BarWidget {
                       // Attendee Name (60% of window width)
                       ColumnLayout {
                         Layout.preferredWidth: Math.floor(formScroll.availableWidth * 0.60)
-                        Layout.fillWidth: false
                         spacing: 2
                         Text {
-                          text: "Attendee " + (index + 1) + ":"
+                          text: "Name:"
                           font.family: "JetBrainsMono Nerd Font"
                           font.bold: true
-                          font.pixelSize: 11
+                          font.pixelSize: Style.font.small
                           color: Color.foreground
                         }
                         Rectangle {
                           Layout.fillWidth: true
-                          width: parent.width
                           Layout.preferredHeight: 34
                           radius: 4
                           color: Util.alpha(Color.foreground, 0.08)
@@ -1023,7 +1083,6 @@ BarWidget {
                             font.family: "JetBrainsMono Nerd Font"
                             font.pixelSize: Style.font.small
                             color: Color.foreground
-                            enabled: !root.stateObj.is_recording
                             text: model.name
                             onTextChanged: model.name = text
                             Keys.onTabPressed: {
@@ -1114,7 +1173,6 @@ BarWidget {
                               anchors.fill: parent
                               hoverEnabled: true
                               cursorShape: Qt.PointingHandCursor
-                              enabled: !root.stateObj.is_recording
                               onClicked: model.sex = (model.sex === "Male" ? "" : "Male")
                             }
                           }
@@ -1163,7 +1221,6 @@ BarWidget {
                               anchors.fill: parent
                               hoverEnabled: true
                               cursorShape: Qt.PointingHandCursor
-                              enabled: !root.stateObj.is_recording
                               onClicked: model.sex = (model.sex === "Female" ? "" : "Female")
                             }
                           }
@@ -1181,7 +1238,7 @@ BarWidget {
 
                         Text {
                           anchors.centerIn: parent
-                          text: "󰅖"
+                          text: "✕"
                           font.family: "JetBrainsMono Nerd Font"
                           font.pixelSize: 11
                           color: delAttMouse.containsMouse ? Color.urgent : Color.muted
@@ -1201,28 +1258,17 @@ BarWidget {
                   // Add Attendee Button
                   Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 32
+                    Layout.preferredHeight: 30
                     radius: 4
-                    color: addAttMouse.containsMouse ? Util.alpha(Color.accent, 0.25) : Util.alpha(Color.accent, 0.12)
+                    color: addAttMouse.containsMouse ? Util.alpha(Color.accent, 0.2) : Util.alpha(Color.accent, 0.08)
                     border.width: 1
-                    border.color: Util.alpha(Color.accent, 0.4)
+                    border.color: Color.accent
 
                     RowLayout {
                       anchors.centerIn: parent
                       spacing: 6
-                      Text {
-                        text: "󰐕"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: 12
-                        color: Color.accent
-                      }
-                      Text {
-                        text: "Add Attendee"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: Style.font.small
-                        color: Color.accent
-                      }
+                      Text { text: "+"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.accent }
+                      Text { text: "Add Attendee"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.small; color: Color.accent }
                     }
 
                     MouseArea {
@@ -1263,7 +1309,6 @@ BarWidget {
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.foreground
-                      enabled: !root.stateObj.is_recording
                       text: root.meetingNotesText
                       onTextChanged: root.meetingNotesText = text
                       Keys.onBacktabPressed: {
@@ -1321,7 +1366,6 @@ BarWidget {
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.foreground
-                      enabled: !root.stateObj.is_recording
                       text: root.memoTitleText
                       onTextChanged: root.memoTitleText = text
                       Keys.onTabPressed: memoTopicsIn.forceActiveFocus()
@@ -1365,7 +1409,6 @@ BarWidget {
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.foreground
-                      enabled: !root.stateObj.is_recording
                       text: root.memoTopicsText
                       onTextChanged: root.memoTopicsText = text
                       Keys.onTabPressed: memoNotesIn.forceActiveFocus()
@@ -1410,7 +1453,6 @@ BarWidget {
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.foreground
-                      enabled: !root.stateObj.is_recording
                       text: root.memoNotesText
                       onTextChanged: root.memoNotesText = text
                       Keys.onBacktabPressed: memoTopicsIn.forceActiveFocus()

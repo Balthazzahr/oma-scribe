@@ -1711,31 +1711,42 @@ BarWidget {
                     }
                   }
 
-                  // ACTION BUTTON: Transcribe Status
+                  // ACTION BUTTON: Transcribe Status / Pulsing Transcribing Badge
                   Rectangle {
+                    id: transBadge
                     visible: !modelData.has_notes
-                    width: itemCard.isTranscribingThis ? 126 : 100
-                    height: 28
+                    implicitWidth: transContentRow.implicitWidth + 24
+                    implicitHeight: 28
                     radius: 4
-                    color: itemCard.isTranscribingThis ? Util.alpha(Color.accent, 0.25) : (trMouse.containsMouse ? Color.pick("accent-hover", Color.accent) : Color.accent)
+                    color: itemCard.isTranscribingThis ? Util.alpha(Color.urgent, 0.18) : (trMouse.containsMouse ? Color.pick("accent-hover", Color.accent) : Color.accent)
                     border.width: itemCard.isTranscribingThis ? 1 : 0
-                    border.color: Color.accent
+                    border.color: Color.urgent
+
+                    SequentialAnimation on opacity {
+                      running: itemCard.isTranscribingThis
+                      loops: Animation.Infinite
+                      NumberAnimation { from: 1.0; to: 0.35; duration: 650; easing.type: Easing.InOutQuad }
+                      NumberAnimation { from: 0.35; to: 1.0; duration: 650; easing.type: Easing.InOutQuad }
+                    }
 
                     RowLayout {
+                      id: transContentRow
                       anchors.centerIn: parent
-                      spacing: 5
+                      spacing: 6
+
                       Text {
                         text: itemCard.isTranscribingThis ? "󰑮" : "󰑊"
                         font.family: "JetBrainsMono Nerd Font"
                         font.pixelSize: 12
-                        color: itemCard.isTranscribingThis ? Color.accent : Color.pick("background", "#1e1e2e")
+                        color: itemCard.isTranscribingThis ? Color.urgent : Color.pick("background", "#1e1e2e")
                       }
+
                       Text {
                         text: itemCard.isTranscribingThis ? "Transcribing..." : "Transcribe"
                         font.family: "JetBrainsMono Nerd Font"
                         font.bold: true
                         font.pixelSize: 11
-                        color: itemCard.isTranscribingThis ? Color.accent : Color.pick("background", "#1e1e2e")
+                        color: itemCard.isTranscribingThis ? Color.urgent : Color.pick("background", "#1e1e2e")
                       }
                     }
 
@@ -1751,16 +1762,16 @@ BarWidget {
 
                   // ACTION BUTTON: Delete Recording & Folder
                   Rectangle {
-                    width: 30
-                    height: 28
+                    implicitWidth: 30
+                    implicitHeight: 28
                     radius: 4
                     color: deleteMouse.containsMouse ? Util.alpha(Color.urgent, 0.25) : Util.alpha(Color.foreground, 0.08)
 
                     Text {
                       anchors.centerIn: parent
-                      text: "󰅖"
+                      text: "✕"
                       font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: 12
+                      font.pixelSize: 11
                       color: deleteMouse.containsMouse ? Color.urgent : Color.muted
                     }
 

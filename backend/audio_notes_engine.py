@@ -15,12 +15,25 @@ import json
 import time
 import signal
 import base64
+import hashlib
+import re
 import urllib.request
 import urllib.error
 import urllib.parse
 import subprocess
 from pathlib import Path
 from datetime import datetime
+
+def get_audio_mime_type(file_path):
+    ext = Path(file_path).suffix.lower()
+    if ext == ".mp3":
+        return "audio/mp3"
+    elif ext in (".m4a", ".mp4", ".aac"):
+        return "audio/mp4"
+    elif ext == ".wav":
+        return "audio/wav"
+    else:
+        return "audio/ogg"
 
 APP_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = Path.home() / ".config" / "omarchy" / "audio_notes.json"
@@ -255,19 +268,17 @@ def start_recording(mode="meeting", title="", metadata=None):
     note_dir = storage / safe_folder_name
     note_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_path = note_dir / "recording.opus"
+    settings = load_settings()
+    audio_fmt = settings.get("audio_format", "opus")
+    audio_ext, codec_flags = get_audio_codec_args(audio_fmt)
+    audio_path = note_dir / f"recording{audio_ext}"
 
-    # Save pre-meeting metadata
+    # Save pre-meeting metadata to hidden cache (keeps user folder clean)
     meta_obj["mode"] = mode
     meta_obj["title"] = title
     meta_obj["created_at"] = now.strftime("%Y-%m-%d %H:%M")
     meta_obj["date_time_str"] = date_time_str
-    meta_path = note_dir / "metadata.json"
-    try:
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta_obj, f, indent=2)
-    except Exception:
-        pass
+    save_note_metadata(note_dir, meta_obj)
 
     # Build ffmpeg command
     if mode == "meeting":
@@ -277,18 +288,14 @@ def start_recording(mode="meeting", title="", metadata=None):
             "-f", "pulse", "-i", "default",
             "-f", "pulse", "-i", "default.monitor",
             "-filter_complex", "[0:a]pan=mono|c0=c0[a0];[1:a]pan=mono|c0=c0[a1];[a0][a1]amerge=inputs=2[out]",
-            "-map", "[out]",
-            "-c:a", "libopus", "-b:a", "96k",
-            str(audio_path)
-        ]
+            "-map", "[out]"
+        ] + codec_flags + [str(audio_path)]
     else:
         # Voice memo mode: Microphone only
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "pulse", "-i", "default",
-            "-c:a", "libopus", "-b:a", "96k",
-            str(audio_path)
-        ]
+            "-f", "pulse", "-i", "default"
+        ] + codec_flags + [str(audio_path)]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
@@ -351,9 +358,10 @@ def post_multipart_file(url, api_key, file_path, fields):
         body.extend(f"{v}\r\n".encode("utf-8"))
 
     filename = os.path.basename(file_path)
+    mime_type = get_audio_mime_type(file_path)
     body.extend(f"--{boundary}\r\n".encode("utf-8"))
     body.extend(f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"))
-    body.extend(b"Content-Type: audio/ogg\r\n\r\n")
+    body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"))
     with open(file_path, "rb") as f:
         body.extend(f.read())
     body.extend(b"\r\n")
@@ -373,7 +381,10 @@ def post_multipart_file(url, api_key, file_path, fields):
 # =========================================================================
 # PROVIDER 1: GOOGLE GEMINI (DIRECT MULTIMODAL AUDIO)
 # =========================================================================
-def upload_file_to_gemini(api_key, file_path, mime_type="audio/ogg"):
+def upload_file_to_gemini(api_key, file_path, mime_type=None):
+    if mime_type is None:
+        mime_type = get_audio_mime_type(file_path)
+
     file_size = os.path.getsize(file_path)
     display_name = os.path.basename(file_path)
 
@@ -432,7 +443,8 @@ def generate_notes_and_transcript_with_gemini(audio_path, mode="meeting", title=
     if not api_key:
         raise ValueError("Google Gemini API key is required. Please set it in Audio Notes settings.")
 
-    file_uri = upload_file_to_gemini(api_key, audio_path, mime_type="audio/ogg")
+    mime_type = get_audio_mime_type(audio_path)
+    file_uri = upload_file_to_gemini(api_key, audio_path, mime_type=mime_type)
 
     speaker_context = ""
     if speakers and speakers.strip():

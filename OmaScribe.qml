@@ -185,8 +185,7 @@ BarWidget {
   }
 
   function openFolder() {
-    var p = root.settingsObj.storage_path || (Quickshell.env("HOME") + "/Documents/AudioNotes")
-    execProc.command = ["xdg-open", p]
+    execProc.command = ["python3", enginePath, "open-storage-folder"]
     execProc.running = true
   }
 
@@ -256,6 +255,12 @@ BarWidget {
           if (parsed.openai_model) root.selectedOpenAIModel = parsed.openai_model
           if (parsed.local_model) root.selectedLocalModel = parsed.local_model
           if (parsed.default_mode) root.selectedMode = parsed.default_mode
+          if (parsed.storage_path) {
+            root.settingsObj.storage_path = parsed.storage_path
+            if (typeof storagePathInput !== "undefined" && storagePathInput) {
+              storagePathInput.text = parsed.storage_path
+            }
+          }
           apiKeyInput.text = root.getCurrentApiKey()
         } catch(e) {}
       }
@@ -299,9 +304,15 @@ BarWidget {
           var res = JSON.parse(raw)
           if (res.status === "ok" && res.path) {
             root.settingsObj.storage_path = res.path
-            storagePathInput.text = res.path
+            if (typeof storagePathInput !== "undefined" && storagePathInput) {
+              storagePathInput.text = res.path
+            }
+            var settingsJson = JSON.stringify(root.settingsObj)
+            actionProc.command = ["python3", root.enginePath, "save-settings", settingsJson]
+            actionProc.running = true
             root.saveFeedbackText = "✓ Storage folder updated!"
             feedbackTimer.restart()
+            root.loadHistory()
           }
         } catch(e) {}
       }

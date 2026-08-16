@@ -846,6 +846,14 @@ def open_file_in_editor(file_path):
     except Exception:
         subprocess.Popen(["xdg-open", file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
+def open_storage_folder():
+    storage = get_storage_path()
+    storage.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.Popen(["xdg-open", str(storage)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        pass
+
 def delete_recording(audio_path):
     if not audio_path:
         return {"status": "error", "message": "No file path provided"}
@@ -954,6 +962,10 @@ def main():
     elif cmd == "open-editor":
         target = sys.argv[2]
         open_file_in_editor(target)
+        print(json.dumps({"status": "ok"}))
+
+    elif cmd == "open-storage-folder":
+        open_storage_folder()
         print(json.dumps({"status": "ok"}))
 
     elif cmd == "get-settings":

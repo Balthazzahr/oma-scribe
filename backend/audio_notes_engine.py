@@ -59,24 +59,20 @@ DEFAULT_SETTINGS = {
     "notes_editor": "xdg-open"
 }
 
-def get_meta_file(folder_or_file):
-    META_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    p = Path(folder_or_file)
-    folder_name = p.name if p.is_dir() else p.parent.name
-    key = hashlib.sha256(folder_name.encode("utf-8")).hexdigest()[:16]
-    safe_name = "".join(c for c in folder_name[:30] if c.isalnum() or c in "._-")
-    return META_CACHE_DIR / f"{safe_name}_{key}.json"
-
 def load_note_metadata(folder_or_file):
-    meta_file = get_meta_file(folder_or_file)
-    if meta_file.exists():
+    p = Path(folder_or_file)
+    folder = p if p.is_dir() else p.parent
+
+    # 1. Primary: Hidden .metadata.json in folder
+    hidden_p = folder / ".metadata.json"
+    if hidden_p.exists():
         try:
-            with open(meta_file, "r", encoding="utf-8") as f:
+            with open(hidden_p, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
-    p = Path(folder_or_file)
-    folder = p if p.is_dir() else p.parent
+
+    # 2. Legacy visible metadata.json in folder (migrate to hidden .metadata.json)
     legacy_p = folder / "metadata.json"
     if legacy_p.exists():
         try:
@@ -90,13 +86,21 @@ def load_note_metadata(folder_or_file):
                 return data
         except Exception:
             pass
+
     return {}
 
 def save_note_metadata(folder_or_file, meta):
-    meta_file = get_meta_file(folder_or_file)
+    p = Path(folder_or_file)
+    folder = p if p.is_dir() else p.parent
+    hidden_p = folder / ".metadata.json"
     try:
-        with open(meta_file, "w", encoding="utf-8") as f:
+        with open(hidden_p, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
+    except Exception:
+        pass
+    # Clean visible metadata.json if present
+    try:
+        (folder / "metadata.json").unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -342,9 +346,11 @@ def stop_recording():
         notify("Recording Saved", f"Saved to {folder_name}")
 
     settings = load_settings()
+    # Auto-transcribe immediately if title was already provided prior to capture
     if settings.get("auto_transcribe_on_stop") and audio_file and os.path.exists(audio_file):
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "transcribe", audio_file, mode, title],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        if title and title.strip() and title not in ("Meeting", "Voice Memo"):
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "transcribe", audio_file, mode, title],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
     return {"status": "ok", "audio_file": audio_file, "state": state}
 
@@ -989,12 +995,18 @@ def rename_note(target_path, new_title):
             except Exception as e:
                 return {"status": "error", "message": f"Rename failed: {str(e)}"}
 
-    # Update metadata cache
+    # Update hidden .metadata.json in folder
     save_note_metadata(folder, meta)
-    try:
-        (folder / "metadata.json").unlink(missing_ok=True)
-    except Exception:
-        pass
+
+    # If notes file exists in the folder, update the title heading inside the notes file too
+    for nf in folder.glob("notes.*"):
+        try:
+            content = nf.read_text(encoding="utf-8")
+            new_content = re.sub(r'^(#+\s*📋\s*(?:Meeting Summary|Voice Memo):?\s*)[^\n]+', r'\g<1>' + new_title, content, flags=re.MULTILINE)
+            if new_content != content:
+                nf.write_text(new_content, encoding="utf-8")
+        except Exception:
+            pass
 
     return {"status": "ok", "new_folder": str(folder), "new_title": new_title}
 

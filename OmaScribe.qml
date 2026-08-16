@@ -71,6 +71,8 @@ BarWidget {
   property int elapsedSeconds: 0
   property bool showApiKey: false
   property string saveFeedbackText: ""
+  property string selectedNotesFormat: "md"
+  property string selectedAudioFormat: "opus"
 
   // Pre-meeting Form Properties
   property string meetingTitleText: ""
@@ -261,6 +263,8 @@ BarWidget {
           if (parsed.openai_model) root.selectedOpenAIModel = parsed.openai_model
           if (parsed.local_model) root.selectedLocalModel = parsed.local_model
           if (parsed.default_mode) root.selectedMode = parsed.default_mode
+          if (parsed.notes_format) root.selectedNotesFormat = parsed.notes_format
+          if (parsed.audio_format) root.selectedAudioFormat = parsed.audio_format
           if (parsed.storage_path) {
             root.settingsObj.storage_path = parsed.storage_path
             if (typeof storagePathInput !== "undefined" && storagePathInput) {
@@ -2477,6 +2481,145 @@ BarWidget {
               }
             }
 
+            // Section 6: Notes Document Format
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 6
+
+              Text {
+                text: "Notes & Transcript Document Format:"
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: Style.font.small
+                color: Color.foreground
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Repeater {
+                  model: [
+                    { id: "md",   name: "Markdown (.md)",   desc: "Standard headings, bold, bullet points" },
+                    { id: "txt",  name: "Plain Text (.txt)", desc: "Clean stripped text with zero tags" },
+                    { id: "html", name: "HTML (.html)",     desc: "Standalone styled document" }
+                  ]
+
+                  Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 38
+                    radius: 6
+                    border.width: 1
+                    border.color: root.selectedNotesFormat === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
+                    color: root.selectedNotesFormat === modelData.id ? Util.alpha(Color.accent, 0.15) : (fmtMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
+
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.margins: 8
+                      spacing: 6
+
+                      Text {
+                        Layout.fillWidth: true
+                        text: modelData.name
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.bold: root.selectedNotesFormat === modelData.id
+                        font.pixelSize: 11
+                        color: root.selectedNotesFormat === modelData.id ? Color.accent : Color.foreground
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        visible: root.selectedNotesFormat === modelData.id
+                        text: "✓"
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.bold: true
+                        font.pixelSize: 11
+                        color: Color.accent
+                      }
+                    }
+
+                    MouseArea {
+                      id: fmtMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.selectedNotesFormat = modelData.id
+                    }
+                  }
+                }
+              }
+            }
+
+            // Section 7: Audio Recording Format
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 6
+
+              Text {
+                text: "Audio Recording Format:"
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: Style.font.small
+                color: Color.foreground
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Repeater {
+                  model: [
+                    { id: "opus", name: "Opus (.opus)", desc: "Best quality / size (~10MB/hr)" },
+                    { id: "mp3",  name: "MP3 (.mp3)",   desc: "Universal compatibility" },
+                    { id: "m4a",  name: "M4A (.m4a)",   desc: "AAC High Fidelity" },
+                    { id: "wav",  name: "WAV (.wav)",   desc: "Lossless uncompressed" }
+                  ]
+
+                  Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 38
+                    radius: 6
+                    border.width: 1
+                    border.color: root.selectedAudioFormat === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
+                    color: root.selectedAudioFormat === modelData.id ? Util.alpha(Color.accent, 0.15) : (afmtMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
+
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.margins: 8
+                      spacing: 4
+
+                      Text {
+                        Layout.fillWidth: true
+                        text: modelData.name
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.bold: root.selectedAudioFormat === modelData.id
+                        font.pixelSize: 11
+                        color: root.selectedAudioFormat === modelData.id ? Color.accent : Color.foreground
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        visible: root.selectedAudioFormat === modelData.id
+                        text: "✓"
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.bold: true
+                        font.pixelSize: 11
+                        color: Color.accent
+                      }
+                    }
+
+                    MouseArea {
+                      id: afmtMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.selectedAudioFormat = modelData.id
+                    }
+                  }
+                }
+              }
+            }
+
             Item { Layout.preferredHeight: 4 }
 
             // Save Settings Button
@@ -2503,6 +2646,8 @@ BarWidget {
                   root.settingsObj.openai_model = root.selectedOpenAIModel
                   root.settingsObj.local_model = root.selectedLocalModel
                   root.settingsObj.storage_path = storagePathInput.text.trim()
+                  root.settingsObj.notes_format = root.selectedNotesFormat
+                  root.settingsObj.audio_format = root.selectedAudioFormat
                   root.setCurrentApiKey(apiKeyInput.text.trim())
 
                   var settingsJson = JSON.stringify(root.settingsObj)

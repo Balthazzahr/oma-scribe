@@ -27,6 +27,8 @@ CONFIG_FILE = Path.home() / ".config" / "omarchy" / "audio_notes.json"
 CACHE_DIR = Path.home() / ".cache"
 STATE_FILE = CACHE_DIR / "audio_notes_state.json"
 
+META_CACHE_DIR = Path.home() / ".cache" / "omarchy" / "oma_scribe_metadata"
+
 DEFAULT_SETTINGS = {
     "provider": "gemini",
     "gemini_api_key": "",
@@ -37,10 +39,94 @@ DEFAULT_SETTINGS = {
     "openai_model": "gpt-4o-mini",
     "local_model": "base",
     "storage_path": str(Path.home() / "Documents" / "AudioNotes"),
+    "notes_format": "md",    # "md" | "txt" | "html"
+    "audio_format": "opus",  # "opus" | "mp3" | "m4a" | "wav"
     "auto_transcribe_on_stop": True,
     "default_mode": "meeting",
     "notes_editor": "xdg-open"
 }
+
+def get_meta_file(folder_or_file):
+    META_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    p = Path(folder_or_file)
+    folder_name = p.name if p.is_dir() else p.parent.name
+    key = hashlib.sha256(folder_name.encode("utf-8")).hexdigest()[:16]
+    safe_name = "".join(c for c in folder_name[:30] if c.isalnum() or c in "._-")
+    return META_CACHE_DIR / f"{safe_name}_{key}.json"
+
+def load_note_metadata(folder_or_file):
+    meta_file = get_meta_file(folder_or_file)
+    if meta_file.exists():
+        try:
+            with open(meta_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    p = Path(folder_or_file)
+    folder = p if p.is_dir() else p.parent
+    legacy_p = folder / "metadata.json"
+    if legacy_p.exists():
+        try:
+            with open(legacy_p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                save_note_metadata(folder, data)
+                try:
+                    legacy_p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return data
+        except Exception:
+            pass
+    return {}
+
+def save_note_metadata(folder_or_file, meta):
+    meta_file = get_meta_file(folder_or_file)
+    try:
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        pass
+
+def get_audio_codec_args(audio_format):
+    fmt = (audio_format or "opus").lower()
+    if fmt == "mp3":
+        return ".mp3", ["-c:a", "libmp3lame", "-b:a", "128k"]
+    elif fmt == "m4a":
+        return ".m4a", ["-c:a", "aac", "-b:a", "96k"]
+    elif fmt == "wav":
+        return ".wav", ["-c:a", "pcm_s16le"]
+    else:
+        return ".opus", ["-c:a", "libopus", "-b:a", "96k"]
+
+def format_notes_content(text, notes_format):
+    fmt = (notes_format or "md").lower()
+    if fmt == "txt":
+        import re
+        clean = re.sub(r'#+\s*', '', text)
+        clean = re.sub(r'\*\*(.*?)\*\*', r'\1', clean)
+        clean = re.sub(r'\*(.*?)\*', r'\1', clean)
+        clean = re.sub(r'`(.*?)`', r'\1', clean)
+        return clean
+    elif fmt == "html":
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {{ font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #222; background: #fafafa; }}
+h1, h2, h3 {{ color: #111; margin-top: 1.5em; }}
+code {{ background: #eee; padding: 2px 5px; border-radius: 3px; font-family: monospace; }}
+pre {{ background: #f4f4f4; padding: 12px; border-radius: 6px; overflow-x: auto; }}
+ul, ol {{ padding-left: 24px; }}
+li {{ margin-bottom: 6px; }}
+</style>
+</head>
+<body>
+<pre style="white-space: pre-wrap; font-family: inherit;">{text}</pre>
+</body>
+</html>"""
+    else:
+        return text
 
 def get_storage_path():
     settings = load_settings()
@@ -634,18 +720,8 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
     p = Path(audio_path)
     note_dir = p.parent
 
-    # Check for metadata.json or <stem>.meta.json
-    meta = {}
-    meta_path = note_dir / "metadata.json"
-    if not meta_path.exists():
-        meta_path = p.with_suffix(".meta.json")
-
-    if meta_path.exists():
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-        except Exception:
-            pass
+    # Load metadata from hidden cache
+    meta = load_note_metadata(note_dir)
 
     if not title and meta.get("title"):
         title = meta.get("title")
@@ -719,21 +795,28 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
                 audio_path=str(audio_path), mode=mode, title=title, api_key=api_key, model=model, speakers=speakers
             )
 
-        notes_file = note_dir / "notes.md"
+        notes_fmt = settings.get("notes_format", "md").lower()
+        formatted_notes = format_notes_content(summary_md, notes_fmt)
+        formatted_trans = format_notes_content(transcript_md, notes_fmt)
+
+        notes_file = note_dir / f"notes.{notes_fmt}"
         with open(notes_file, "w", encoding="utf-8") as f:
-            f.write(summary_md)
+            f.write(formatted_notes)
 
-        transcript_file = note_dir / "transcript.md"
+        transcript_file = note_dir / f"transcript.{notes_fmt}"
         with open(transcript_file, "w", encoding="utf-8") as f:
-            f.write(transcript_md)
+            f.write(formatted_trans)
 
-        # Update metadata.json with completed info
+        # Update metadata in hidden cache
         meta["has_notes"] = True
         meta["has_transcript"] = True
         meta["title"] = title
+        meta["notes_format"] = notes_fmt
+        save_note_metadata(note_dir, meta)
+
+        # Clean legacy metadata.json from note_dir if present
         try:
-            with open(note_dir / "metadata.json", "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
+            (note_dir / "metadata.json").unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -763,25 +846,25 @@ def list_history():
     # 1. Look for subfolders in storage (each folder is one note)
     for d in sorted(storage.iterdir(), key=os.path.getmtime, reverse=True):
         if d.is_dir() and d.name not in ("recordings", "notes", "transcripts"):
-            opus_files = list(d.glob("*.opus"))
-            if not opus_files:
+            # Clean legacy metadata from user folder
+            legacy_meta = d / "metadata.json"
+            if legacy_meta.exists():
+                load_note_metadata(d)
+
+            audio_files = list(d.glob("*.opus")) + list(d.glob("*.mp3")) + list(d.glob("*.m4a")) + list(d.glob("*.wav"))
+            if not audio_files:
                 continue
-            audio_p = opus_files[0]
+            audio_p = audio_files[0]
 
-            notes_p = d / "notes.md"
-            has_notes = notes_p.exists()
+            notes_files = list(d.glob("notes.*"))
+            notes_p = notes_files[0] if notes_files else None
+            has_notes = notes_p is not None and notes_p.exists()
 
-            trans_p = d / "transcript.md"
-            has_transcript = trans_p.exists()
+            trans_files = list(d.glob("transcript.*"))
+            trans_p = trans_files[0] if trans_files else None
+            has_transcript = trans_p is not None and trans_p.exists()
 
-            meta = {}
-            meta_p = d / "metadata.json"
-            if meta_p.exists():
-                try:
-                    with open(meta_p, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                except Exception:
-                    pass
+            meta = load_note_metadata(d)
 
             mode = meta.get("mode") or ("mic" if "memo" in d.name.lower() or "_mic_" in audio_p.name else "meeting")
             display_title = meta.get("title") or d.name.split(" - ")[0] or d.name
@@ -866,14 +949,7 @@ def rename_note(target_path, new_title):
     if not folder.exists():
         return {"status": "error", "message": "Folder not found"}
 
-    meta = {}
-    meta_p = folder / "metadata.json"
-    if meta_p.exists():
-        try:
-            with open(meta_p, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-        except Exception:
-            pass
+    meta = load_note_metadata(folder)
 
     date_time_str = meta.get("date_time_str")
     if not date_time_str:
@@ -901,10 +977,10 @@ def rename_note(target_path, new_title):
             except Exception as e:
                 return {"status": "error", "message": f"Rename failed: {str(e)}"}
 
-    # Update metadata.json
+    # Update metadata cache
+    save_note_metadata(folder, meta)
     try:
-        with open(folder / "metadata.json", "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
+        (folder / "metadata.json").unlink(missing_ok=True)
     except Exception:
         pass
 

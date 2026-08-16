@@ -854,6 +854,62 @@ def open_storage_folder():
     except Exception:
         pass
 
+def rename_note(target_path, new_title):
+    if not target_path or not new_title or not new_title.strip():
+        return {"status": "error", "message": "Missing path or title"}
+
+    new_title = new_title.strip()
+    p = Path(target_path)
+    folder = p if p.is_dir() else p.parent
+    storage = get_storage_path()
+
+    if not folder.exists():
+        return {"status": "error", "message": "Folder not found"}
+
+    meta = {}
+    meta_p = folder / "metadata.json"
+    if meta_p.exists():
+        try:
+            with open(meta_p, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+
+    date_time_str = meta.get("date_time_str")
+    if not date_time_str:
+        parts = folder.name.split(" - ")
+        if len(parts) >= 2 and any(c.isdigit() for c in parts[-1]):
+            date_time_str = " - ".join(parts[1:])
+        else:
+            try:
+                date_time_str = format_folder_datetime(datetime.fromtimestamp(folder.stat().st_mtime))
+            except Exception:
+                date_time_str = format_folder_datetime()
+
+    meta["title"] = new_title
+    meta["date_time_str"] = date_time_str
+
+    expected_folder_name = f"{new_title} - {date_time_str}"
+    safe_folder_name = "".join(c for c in expected_folder_name if c not in r'\/<>:"|?*').strip()
+
+    if folder.parent == storage and folder != storage:
+        new_folder = storage / safe_folder_name
+        if new_folder != folder:
+            try:
+                folder.rename(new_folder)
+                folder = new_folder
+            except Exception as e:
+                return {"status": "error", "message": f"Rename failed: {str(e)}"}
+
+    # Update metadata.json
+    try:
+        with open(folder / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        pass
+
+    return {"status": "ok", "new_folder": str(folder), "new_title": new_title}
+
 def delete_recording(audio_path):
     if not audio_path:
         return {"status": "error", "message": "No file path provided"}
@@ -951,6 +1007,11 @@ def main():
     elif cmd == "delete":
         target = sys.argv[2] if len(sys.argv) > 2 else ""
         print(json.dumps(delete_recording(target)))
+
+    elif cmd == "rename":
+        target = sys.argv[2] if len(sys.argv) > 2 else ""
+        new_title = sys.argv[3] if len(sys.argv) > 3 else ""
+        print(json.dumps(rename_note(target, new_title)))
 
     elif cmd == "transcribe":
         audio_file = sys.argv[2]

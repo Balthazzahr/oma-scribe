@@ -184,6 +184,12 @@ BarWidget {
     actionProc.running = true
   }
 
+  function renameNote(targetPath, newTitle) {
+    if (!targetPath || !newTitle || !newTitle.trim()) return
+    actionProc.command = ["python3", enginePath, "rename", targetPath, newTitle.trim()]
+    actionProc.running = true
+  }
+
   function openFolder() {
     execProc.command = ["python3", enginePath, "open-storage-folder"]
     execProc.running = true
@@ -1589,6 +1595,7 @@ BarWidget {
                 border.color: Util.alpha(Color.foreground, 0.1)
 
                 property bool isTranscribingThis: root.stateObj.is_processing && (!modelData.has_notes || root.stateObj.last_processed_file === modelData.audio_file)
+                property bool isEditingTitle: false
 
                 // Left column: Mode icon, Title, metadata
                 ColumnLayout {
@@ -1599,23 +1606,154 @@ BarWidget {
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: 3
 
+                  // Title Row (Display or Edit mode)
                   RowLayout {
                     Layout.fillWidth: true
                     spacing: 6
+
                     Text {
                       text: modelData.mode === "meeting" ? "\uf4fd" : "󰍬"
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.accent
                     }
-                    Text {
+
+                    // Normal Title Display with Edit Pencil Icon
+                    RowLayout {
+                      visible: !itemCard.isEditingTitle
                       Layout.fillWidth: true
-                      text: modelData.title || modelData.filename
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.bold: true
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                      elide: Text.ElideRight
+                      spacing: 6
+
+                      Text {
+                        text: modelData.title || modelData.filename
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.bold: true
+                        font.pixelSize: Style.font.small
+                        color: Color.foreground
+                        elide: Text.ElideRight
+                      }
+
+                      // Rename Pencil Icon Button
+                      Rectangle {
+                        width: 20
+                        height: 20
+                        radius: 3
+                        color: editMouse.containsMouse ? Util.alpha(Color.accent, 0.2) : "transparent"
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: "󰏫"
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.pixelSize: 11
+                          color: editMouse.containsMouse ? Color.accent : Util.alpha(Color.foreground, 0.4)
+                        }
+
+                        MouseArea {
+                          id: editMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: {
+                            itemCard.isEditingTitle = true
+                            editInput.text = modelData.title || modelData.filename
+                            editInput.forceActiveFocus()
+                          }
+                        }
+                      }
+                    }
+
+                    // Inline Title Edit Field with Save / Cancel Buttons
+                    RowLayout {
+                      visible: itemCard.isEditingTitle
+                      Layout.fillWidth: true
+                      spacing: 4
+
+                      Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 24
+                        radius: 4
+                        color: Util.alpha(Color.foreground, 0.08)
+                        border.width: 1
+                        border.color: Color.accent
+
+                        TextInput {
+                          id: editInput
+                          anchors.fill: parent
+                          anchors.leftMargin: 6
+                          anchors.rightMargin: 6
+                          verticalAlignment: TextInput.AlignVCenter
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.pixelSize: Style.font.small
+                          font.bold: true
+                          color: Color.foreground
+                          selectByMouse: true
+                          Keys.onReturnPressed: {
+                            if (text.trim() && text.trim() !== modelData.title) {
+                              root.renameNote(modelData.audio_file, text.trim())
+                            }
+                            itemCard.isEditingTitle = false
+                          }
+                          Keys.onEscapePressed: {
+                            itemCard.isEditingTitle = false
+                          }
+                        }
+                      }
+
+                      // Save Button (✓)
+                      Rectangle {
+                        width: 22
+                        height: 22
+                        radius: 3
+                        color: saveEditMouse.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.2)
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: "✓"
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.bold: true
+                          font.pixelSize: 11
+                          color: saveEditMouse.containsMouse ? Color.pick("background", "#1e1e2e") : Color.accent
+                        }
+
+                        MouseArea {
+                          id: saveEditMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: {
+                            if (editInput.text.trim() && editInput.text.trim() !== modelData.title) {
+                              root.renameNote(modelData.audio_file, editInput.text.trim())
+                            }
+                            itemCard.isEditingTitle = false
+                          }
+                        }
+                      }
+
+                      // Cancel Button (✕)
+                      Rectangle {
+                        width: 22
+                        height: 22
+                        radius: 3
+                        color: cancelEditMouse.containsMouse ? Util.alpha(Color.urgent, 0.2) : Util.alpha(Color.foreground, 0.1)
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: "✕"
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.pixelSize: 10
+                          color: cancelEditMouse.containsMouse ? Color.urgent : Color.muted
+                        }
+
+                        MouseArea {
+                          id: cancelEditMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: {
+                            itemCard.isEditingTitle = false
+                          }
+                        }
+                      }
                     }
                   }
 

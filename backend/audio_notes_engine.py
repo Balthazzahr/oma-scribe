@@ -384,13 +384,6 @@ def stop_recording(metadata=None):
         folder_name = Path(audio_file).parent.name
         notify("Recording Saved", f"Saved to {folder_name}")
 
-    settings = load_settings()
-    # Auto-transcribe immediately if title was provided
-    if settings.get("auto_transcribe_on_stop") and audio_file and os.path.exists(audio_file):
-        if title and title.strip() and title not in ("Meeting", "Voice Memo"):
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "transcribe", audio_file, mode, title],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-
     return {"status": "ok", "audio_file": audio_file, "state": state, "title": title}
 
 # --- HTTP MULTIPART HELPER ---
@@ -777,8 +770,20 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
     p = Path(audio_path)
     note_dir = p.parent
 
-    # Load metadata from hidden cache
+    # Load metadata from hidden .metadata.json
     meta = load_note_metadata(note_dir)
+
+    # Check if speakers argument contains a JSON metadata object
+    if speakers and isinstance(speakers, str) and speakers.strip().startswith("{"):
+        try:
+            extra_meta = json.loads(speakers)
+            meta.update(extra_meta)
+            if extra_meta.get("title") and not title:
+                title = extra_meta.get("title")
+            save_note_metadata(note_dir, meta)
+            speakers = ""
+        except Exception:
+            pass
 
     if not title and meta.get("title"):
         title = meta.get("title")
@@ -799,6 +804,10 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
                 p = Path(audio_path)
             except Exception:
                 pass
+
+        meta["title"] = title.strip()
+        meta["date_time_str"] = date_time_str
+        save_note_metadata(note_dir, meta)
 
     # Build rich context for LLM
     parts = []

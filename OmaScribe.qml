@@ -84,12 +84,10 @@ BarWidget {
   property string memoTopicsText: ""
   property string memoNotesText: ""
 
-  // Post-recording Name & Speakers Dialog State
-  property bool showPostRecordPrompt: false
-  property string pendingAudioFile: ""
-  property string pendingMode: "meeting"
-  property string pendingTitle: ""
-  property string pendingSpeakers: ""
+  // Post-recording in-place review state
+  property bool isReviewingPostRecord: false
+  property string reviewAudioPath: ""
+  property string reviewMode: "meeting"
 
   // Dynamic Attendees List (Default: 3 attendees)
   ListModel {
@@ -120,11 +118,8 @@ BarWidget {
     historyProc.running = true
   }
 
-  function startRecord() {
-    root.showPostRecordPrompt = false
+  function getFormMetadata() {
     var mode = root.selectedMode
-    var meta = {}
-
     if (mode === "meeting") {
       var attendees = []
       for (var i = 0; i < attendeesModel.count; ++i) {
@@ -133,21 +128,25 @@ BarWidget {
           attendees.push({ name: item.name.trim(), sex: (item.sex || "").trim() })
         }
       }
-
-      meta = {
+      return {
         title: root.meetingTitleText.trim(),
         topics: root.meetingTopicsText.trim(),
         attendees: attendees,
         notes: root.meetingNotesText.trim()
       }
     } else {
-      meta = {
+      return {
         title: root.memoTitleText.trim(),
         topics: root.memoTopicsText.trim(),
         notes: root.memoNotesText.trim()
       }
     }
+  }
 
+  function startRecord() {
+    root.isReviewingPostRecord = false
+    var mode = root.selectedMode
+    var meta = root.getFormMetadata()
     var metaJson = JSON.stringify(meta)
     actionProc.command = ["python3", enginePath, "start", mode, metaJson]
     actionProc.running = true
@@ -155,46 +154,48 @@ BarWidget {
 
   function stopRecord() {
     var mode = root.selectedMode
-    var meta = {}
-
-    if (mode === "meeting") {
-      var attendees = []
-      for (var i = 0; i < attendeesModel.count; ++i) {
-        var item = attendeesModel.get(i)
-        if (item.name && item.name.trim()) {
-          attendees.push({ name: item.name.trim(), sex: (item.sex || "").trim() })
-        }
-      }
-
-      meta = {
-        title: root.meetingTitleText.trim(),
-        topics: root.meetingTopicsText.trim(),
-        attendees: attendees,
-        notes: root.meetingNotesText.trim()
-      }
-    } else {
-      meta = {
-        title: root.memoTitleText.trim(),
-        topics: root.memoTopicsText.trim(),
-        notes: root.memoNotesText.trim()
-      }
-    }
-
-    var wasTitleSet = !!meta.title
+    var meta = root.getFormMetadata()
     var currentFile = root.stateObj.current_audio_file
     var currentMode = root.stateObj.mode || root.selectedMode
 
     actionProc.command = ["python3", enginePath, "stop", JSON.stringify(meta)]
     actionProc.running = true
 
-    if (!wasTitleSet && currentFile) {
-      root.pendingAudioFile = currentFile
-      root.pendingMode = currentMode
-      root.pendingTitle = ""
-      root.pendingSpeakers = ""
-      root.showPostRecordPrompt = true
-      popupCard.open = true
-    }
+    root.isReviewingPostRecord = true
+    root.reviewAudioPath = currentFile
+    root.reviewMode = currentMode
+    popupCard.open = true
+  }
+
+  function saveAndTranscribe() {
+    var meta = root.getFormMetadata()
+    var audioFile = root.reviewAudioPath || root.stateObj.current_audio_file || root.stateObj.last_processed_file
+    var mode = root.reviewMode || root.stateObj.mode || root.selectedMode
+    var title = meta.title || ""
+
+    var metaJson = JSON.stringify(meta)
+    actionProc.command = ["python3", enginePath, "transcribe", audioFile, mode, title, metaJson]
+    actionProc.running = true
+
+    root.isReviewingPostRecord = false
+    root.reviewAudioPath = ""
+    root.activeTabIndex = 1
+    root.loadHistory()
+  }
+
+  function resetForm() {
+    root.isReviewingPostRecord = false
+    root.reviewAudioPath = ""
+    root.meetingTitleText = ""
+    root.meetingTopicsText = ""
+    root.meetingNotesText = ""
+    root.memoTitleText = ""
+    root.memoTopicsText = ""
+    root.memoNotesText = ""
+    attendeesModel.clear()
+    attendeesModel.append({ name: "", sex: "" })
+    attendeesModel.append({ name: "", sex: "" })
+    attendeesModel.append({ name: "", sex: "" })
   }
 
   function triggerTranscribe(audioFile, mode, title, speakers) {
@@ -202,7 +203,7 @@ BarWidget {
     var spk = (speakers || "").trim()
     actionProc.command = ["python3", enginePath, "transcribe", audioFile, mode || "meeting", t, spk]
     actionProc.running = true
-    root.showPostRecordPrompt = false
+    root.isReviewingPostRecord = false
     root.activeTabIndex = 1
   }
 
@@ -624,171 +625,57 @@ BarWidget {
           spacing: 8
 
           // ========================================
-          // POST-RECORDING NAME & SPEAKERS PROMPT (IF UNTITLED)
+          // POST-RECORDING REVIEW BANNER (IF REVIEWING)
           // ========================================
           Rectangle {
-            visible: root.showPostRecordPrompt
+            visible: root.isReviewingPostRecord && !root.stateObj.is_recording
             Layout.fillWidth: true
-            Layout.preferredHeight: promptCol.implicitHeight + 20
-            radius: 8
+            Layout.preferredHeight: 34
+            radius: 6
+            color: Util.alpha(Color.accent, 0.15)
             border.width: 1
             border.color: Color.accent
-            color: Util.alpha(Color.accent, 0.1)
 
-            ColumnLayout {
-              id: promptCol
+            RowLayout {
               anchors.fill: parent
-              anchors.margins: 10
+              anchors.margins: 8
               spacing: 8
 
-              RowLayout {
-                spacing: 6
-                Text {
-                  text: root.pendingMode === "meeting" ? "\uf4fd" : "󰍬"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: Style.font.body
-                  color: Color.accent
-                }
-                Text {
-                  text: root.pendingMode === "meeting" ? "Would you like to name this meeting?" : "Would you like to name this audio note?"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.bold: true
-                  font.pixelSize: Style.font.body
-                  color: Color.foreground
-                }
+              Text {
+                text: "󰈙"
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 14
+                color: Color.accent
               }
 
-              // Title Input
-              Rectangle {
+              Text {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 34
+                text: "Recording saved! Review or fill in details above, then click Transcribe."
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: 11
+                color: Color.foreground
+                elide: Text.ElideRight
+              }
+
+              Rectangle {
+                Layout.preferredHeight: 22
+                Layout.preferredWidth: 60
                 radius: 4
                 color: Util.alpha(Color.foreground, 0.08)
-                border.width: 1
-                border.color: postTitleInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.15)
-
-                TextInput {
-                  id: postTitleInput
-                  anchors.fill: parent
-                  anchors.margins: 8
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: Style.font.small
-                  color: Color.foreground
-                  text: root.pendingTitle
-                  onTextChanged: root.pendingTitle = text
-
-                  Text {
-                    text: root.pendingMode === "meeting" ? "Meeting Title" : "Memo Title"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: Style.font.small
-                    color: Color.muted
-                    visible: !postTitleInput.text && !postTitleInput.activeFocus
-                  }
-                }
-              }
-
-              // Speakers Input (for Meetings)
-              ColumnLayout {
-                visible: root.pendingMode === "meeting"
-                Layout.fillWidth: true
-                spacing: 3
 
                 Text {
-                  text: "Please name the speakers in this meeting (optional):"
+                  anchors.centerIn: parent
+                  text: "Reset"
                   font.family: "JetBrainsMono Nerd Font"
-                  font.bold: true
-                  font.pixelSize: Style.font.small
-                  color: Color.foreground
+                  font.pixelSize: 10
+                  color: Color.muted
                 }
 
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 34
-                  radius: 4
-                  color: Util.alpha(Color.foreground, 0.08)
-                  border.width: 1
-                  border.color: speakersInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.15)
-
-                  TextInput {
-                    id: speakersInput
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: Style.font.small
-                    color: Color.foreground
-                    text: root.pendingSpeakers
-                    onTextChanged: root.pendingSpeakers = text
-
-                    Text {
-                      text: "e.g. Alice (me), Bob, Sarah, Alex"
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.muted
-                      visible: !speakersInput.text && !speakersInput.activeFocus
-                    }
-                  }
-                }
-              }
-
-              // Modal Action Buttons
-              RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 34
-                  radius: 6
-                  color: Color.accent
-
-                  RowLayout {
-                    anchors.centerIn: parent
-                    spacing: 4
-                    Text {
-                      text: "\ued03"
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: 11
-                      color: Color.pick("background", "#1e1e2e")
-                    }
-                    Text {
-                      text: "Transcribe & Generate Notes"
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.bold: true
-                      font.pixelSize: 11
-                      color: Color.pick("background", "#1e1e2e")
-                    }
-                  }
-
-                  MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                      root.triggerTranscribe(root.pendingAudioFile, root.pendingMode, root.pendingTitle, root.pendingSpeakers)
-                    }
-                  }
-                }
-
-                Rectangle {
-                  Layout.preferredWidth: 100
-                  Layout.preferredHeight: 34
-                  radius: 6
-                  color: Util.alpha(Color.foreground, 0.1)
-
-                  Text {
-                    anchors.centerIn: parent
-                    text: "Skip"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: 11
-                    color: Color.foreground
-                  }
-
-                  MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                      root.showPostRecordPrompt = false
-                    }
-                  }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.resetForm()
                 }
               }
             }
@@ -1503,7 +1390,7 @@ BarWidget {
               }
             }
 
-            // Big Record Button
+            // Big Action Button (Start / Stop / Save & Transcribe)
             Rectangle {
               Layout.fillWidth: true
               Layout.preferredHeight: 56
@@ -1515,14 +1402,14 @@ BarWidget {
                 spacing: 12
 
                 Text {
-                  text: root.stateObj.is_recording ? "󰓛" : "󰑊"
+                  text: root.stateObj.is_recording ? "󰓛" : (root.isReviewingPostRecord ? "\ued03" : "󰑊")
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 24
                   color: root.stateObj.is_recording ? "#ffffff" : Color.pick("background", "#1e1e2e")
                 }
 
                 Text {
-                  text: root.stateObj.is_recording ? ("STOP RECORDING (" + root.formatDuration(root.elapsedSeconds) + ")") : (root.selectedMode === "meeting" ? "Start Meeting Recording" : "Start Voice Memo")
+                  text: root.stateObj.is_recording ? ("STOP RECORDING (" + root.formatDuration(root.elapsedSeconds) + ")") : (root.isReviewingPostRecord ? "Save & Transcribe Details" : (root.selectedMode === "meeting" ? "Start Meeting Recording" : "Start Voice Memo"))
                   font.family: "JetBrainsMono Nerd Font"
                   font.bold: true
                   font.pixelSize: Style.font.title
@@ -1536,6 +1423,8 @@ BarWidget {
                 onClicked: {
                   if (root.stateObj.is_recording) {
                     root.stopRecord()
+                  } else if (root.isReviewingPostRecord) {
+                    root.saveAndTranscribe()
                   } else {
                     root.startRecord()
                   }

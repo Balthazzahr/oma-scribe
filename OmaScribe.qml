@@ -389,22 +389,61 @@ BarWidget {
     return pad(m) + ":" + pad(s)
   }
 
+  function getBarText() {
+    if (root.stateObj.is_recording) {
+      return root.formatDuration(root.elapsedSeconds) + (root.stateObj.mode === "meeting" ? " (Meeting)" : " (Memo)")
+    }
+    if (root.stateObj.is_processing) {
+      return "󰑮 Transcribing..."
+    }
+    return "\ued03"
+  }
+
   // --- BAR WIDGET BUTTON (ICON: \ued03) ---
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
+    text: (root.stateObj.is_recording ? "● " : "") + root.getBarText()
+    labelVisible: false
     horizontalMargin: 8
     verticalPadding: 6
 
-    text: {
-      if (root.stateObj.is_recording) {
-        return "󰑊 " + root.formatDuration(root.elapsedSeconds) + (root.stateObj.mode === "meeting" ? " (Meeting)" : " (Memo)")
+    RowLayout {
+      anchors.centerIn: parent
+      spacing: 6
+
+      // Pulsing Red Recording Dot
+      Rectangle {
+        id: recDot
+        visible: root.stateObj.is_recording
+        width: 8
+        height: 8
+        radius: 4
+        color: Color.urgent
+
+        SequentialAnimation on opacity {
+          running: root.stateObj.is_recording
+          loops: Animation.Infinite
+          NumberAnimation { from: 1.0; to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
+          NumberAnimation { from: 0.25; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+        }
+
+        SequentialAnimation on scale {
+          running: root.stateObj.is_recording
+          loops: Animation.Infinite
+          NumberAnimation { from: 1.0; to: 1.25; duration: 600; easing.type: Easing.InOutQuad }
+          NumberAnimation { from: 1.25; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+        }
       }
-      if (root.stateObj.is_processing) {
-        return "󰑮 Transcribing..."
+
+      Text {
+        text: root.getBarText()
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.body
+        color: Color.foreground
+        renderType: Text.NativeRendering
       }
-      return "\ued03"
     }
 
     onPressed: function(btn) {

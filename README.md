@@ -62,6 +62,21 @@ omarchy-restart-shell
 
 ---
 
+## 🗑️ Removal / Uninstallation
+
+### Option 1: Via Omarchy Plugin Manager
+```bash
+omarchy plugin uninstall balthazzahr.oma-scribe
+```
+
+### Option 2: Manual Removal
+```bash
+rm -rf ~/.config/omarchy/plugins/balthazzahr.oma-scribe
+omarchy-restart-shell
+```
+
+---
+
 ## ⚙️ AI Provider Setup
 
 Open the **Settings** tab in Oma Scribe to select your preferred AI engine:

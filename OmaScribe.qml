@@ -402,7 +402,7 @@ BarWidget {
         return "󰑊 " + root.formatDuration(root.elapsedSeconds) + (root.stateObj.mode === "meeting" ? " (Meeting)" : " (Memo)")
       }
       if (root.stateObj.is_processing) {
-        return "\ued03 Transcribing..."
+        return "󰑮 Transcribing..."
       }
       return "\ued03"
     }
@@ -569,7 +569,7 @@ BarWidget {
               RowLayout {
                 spacing: 6
                 Text {
-                  text: "\ued03"
+                  text: root.pendingMode === "meeting" ? "\uf4fd" : "󰍬"
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: Style.font.body
                   color: Color.accent
@@ -737,7 +737,7 @@ BarWidget {
                 anchors.centerIn: parent
                 spacing: 6
                 Text {
-                  text: "󰤨"
+                  text: "\uf4fd"
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: Style.font.body
                   color: root.selectedMode === "meeting" ? Color.accent : Color.foreground
@@ -1398,7 +1398,7 @@ BarWidget {
                 anchors.centerIn: parent
                 spacing: 6
                 Text {
-                  text: root.selectedMode === "meeting" ? "󰤨" : "󰍬"
+                  text: root.selectedMode === "meeting" ? "\uf4fd" : "󰍬"
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 11
                   color: Color.accent
@@ -1470,7 +1470,7 @@ BarWidget {
             Repeater {
               model: [
                 { id: "all", label: "󰈙 All" },
-                { id: "meetings", label: "󰤨 Meeting Notes" },
+                { id: "meetings", label: "\uf4fd Meeting Notes" },
                 { id: "memos", label: "󰍬 Audio Notes" }
               ]
 
@@ -1564,7 +1564,7 @@ BarWidget {
                     Layout.fillWidth: true
                     spacing: 6
                     Text {
-                      text: modelData.mode === "meeting" ? "󰤨" : "󰍬"
+                      text: modelData.mode === "meeting" ? "\uf4fd" : "󰍬"
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.accent
@@ -1649,7 +1649,7 @@ BarWidget {
                       anchors.centerIn: parent
                       spacing: 4
                       Text {
-                        text: "\ued03"
+                        text: "󰈙"
                         font.family: "JetBrainsMono Nerd Font"
                         font.pixelSize: 10
                         color: Color.accent
@@ -1675,7 +1675,7 @@ BarWidget {
                   // ACTION BUTTON: Transcribe Status
                   Rectangle {
                     visible: !modelData.has_notes
-                    width: itemCard.isTranscribingThis ? 116 : 96
+                    width: itemCard.isTranscribingThis ? 126 : 100
                     height: 28
                     radius: 4
                     color: itemCard.isTranscribingThis ? Util.alpha(Color.accent, 0.25) : (trMouse.containsMouse ? Color.pick("accent-hover", Color.accent) : Color.accent)
@@ -1684,11 +1684,11 @@ BarWidget {
 
                     RowLayout {
                       anchors.centerIn: parent
-                      spacing: 4
+                      spacing: 5
                       Text {
-                        text: "\ued03"
+                        text: itemCard.isTranscribingThis ? "󰑮" : "󰑊"
                         font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: 11
+                        font.pixelSize: 12
                         color: itemCard.isTranscribingThis ? Color.accent : Color.pick("background", "#1e1e2e")
                       }
                       Text {

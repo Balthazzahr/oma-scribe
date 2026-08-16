@@ -27,8 +27,6 @@ CONFIG_FILE = Path.home() / ".config" / "omarchy" / "audio_notes.json"
 CACHE_DIR = Path.home() / ".cache"
 STATE_FILE = CACHE_DIR / "audio_notes_state.json"
 
-BASE_STORAGE = Path.home() / "Documents" / "AudioNotes"
-
 DEFAULT_SETTINGS = {
     "provider": "gemini",
     "gemini_api_key": "",
@@ -38,10 +36,34 @@ DEFAULT_SETTINGS = {
     "groq_model": "llama-3.3-70b-versatile",
     "openai_model": "gpt-4o-mini",
     "local_model": "base",
+    "storage_path": str(Path.home() / "Documents" / "AudioNotes"),
     "auto_transcribe_on_stop": True,
     "default_mode": "meeting",
     "notes_editor": "xdg-open"
 }
+
+def get_storage_path():
+    settings = load_settings()
+    custom_path = settings.get("storage_path", "").strip()
+    if custom_path:
+        p = Path(custom_path).expanduser()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    default_p = Path.home() / "Documents" / "AudioNotes"
+    default_p.mkdir(parents=True, exist_ok=True)
+    return default_p
+
+def pick_directory():
+    try:
+        res = subprocess.run(["zenity", "--file-selection", "--directory", "--title=Select Storage Folder for Oma Scribe Notes"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if res.returncode == 0:
+            chosen = res.stdout.strip()
+            if chosen:
+                return {"status": "ok", "path": chosen}
+    except Exception:
+        pass
+    return {"status": "cancelled"}
 
 def format_folder_datetime(dt=None):
     if dt is None:
@@ -118,7 +140,8 @@ def start_recording(mode="meeting", title="", metadata=None):
     if state.get("is_recording"):
         return {"status": "error", "message": "Already recording"}
 
-    BASE_STORAGE.mkdir(parents=True, exist_ok=True)
+    storage = get_storage_path()
+    storage.mkdir(parents=True, exist_ok=True)
 
     meta_obj = {}
     if metadata:
@@ -143,7 +166,7 @@ def start_recording(mode="meeting", title="", metadata=None):
         folder_name = date_time_str
 
     safe_folder_name = "".join(c for c in folder_name if c not in r'\/<>:"|?*').strip()
-    note_dir = BASE_STORAGE / safe_folder_name
+    note_dir = storage / safe_folder_name
     note_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = note_dir / "recording.opus"
@@ -633,8 +656,9 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
         expected_folder_name = f"{title.strip()} - {date_time_str}"
         safe_expected = "".join(c for c in expected_folder_name if c not in r'\/<>:"|?*').strip()
 
-        if note_dir.parent == BASE_STORAGE and note_dir.name != safe_expected:
-            new_note_dir = BASE_STORAGE / safe_expected
+        storage = get_storage_path()
+        if note_dir.parent == storage and note_dir.name != safe_expected:
+            new_note_dir = storage / safe_expected
             try:
                 note_dir.rename(new_note_dir)
                 note_dir = new_note_dir
@@ -732,11 +756,12 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
         notify("Transcription Error", str(e))
 
 def list_history():
-    BASE_STORAGE.mkdir(parents=True, exist_ok=True)
+    storage = get_storage_path()
+    storage.mkdir(parents=True, exist_ok=True)
     items = []
 
-    # 1. Look for subfolders in BASE_STORAGE (each folder is one note)
-    for d in sorted(BASE_STORAGE.iterdir(), key=os.path.getmtime, reverse=True):
+    # 1. Look for subfolders in storage (each folder is one note)
+    for d in sorted(storage.iterdir(), key=os.path.getmtime, reverse=True):
         if d.is_dir() and d.name not in ("recordings", "notes", "transcripts"):
             opus_files = list(d.glob("*.opus"))
             if not opus_files:
@@ -778,14 +803,14 @@ def list_history():
             })
 
     # 2. Also check legacy recordings dir if any exist
-    legacy_rec = BASE_STORAGE / "recordings"
+    legacy_rec = storage / "recordings"
     if legacy_rec.exists():
         for p in sorted(legacy_rec.glob("*.opus"), key=os.path.getmtime, reverse=True):
             stem = p.stem
-            note_p = BASE_STORAGE / "notes" / f"{stem}.md"
-            trans_p = BASE_STORAGE / "transcripts" / f"{stem}_transcript.md"
+            note_p = storage / "notes" / f"{stem}.md"
+            trans_p = storage / "transcripts" / f"{stem}_transcript.md"
             if not trans_p.exists():
-                trans_p = BASE_STORAGE / "transcripts" / f"{stem}.md"
+                trans_p = storage / "transcripts" / f"{stem}.md"
 
             mode = "mic" if ("_mic_" in stem or stem.endswith("_mic")) else "meeting"
             size_kb = round(p.stat().st_size / 1024, 1)
@@ -827,9 +852,10 @@ def delete_recording(audio_path):
     try:
         p = Path(audio_path)
         parent_dir = p.parent
+        storage = get_storage_path()
 
-        # If it's a dedicated note directory inside AudioNotes, delete the entire folder
-        if parent_dir.parent == BASE_STORAGE and parent_dir != BASE_STORAGE:
+        # If it's a dedicated note directory inside storage, delete the entire folder
+        if parent_dir.parent == storage and parent_dir != storage:
             import shutil
             shutil.rmtree(parent_dir)
             return {"status": "ok", "deleted": parent_dir.name}
@@ -843,14 +869,14 @@ def delete_recording(audio_path):
         if meta_p.exists():
             meta_p.unlink()
 
-        note_p = BASE_STORAGE / "notes" / f"{stem}.md"
+        note_p = storage / "notes" / f"{stem}.md"
         if note_p.exists():
             note_p.unlink()
 
-        trans_p = BASE_STORAGE / "transcripts" / f"{stem}_transcript.md"
+        trans_p = storage / "transcripts" / f"{stem}_transcript.md"
         if trans_p.exists():
             trans_p.unlink()
-        trans_p_alt = BASE_STORAGE / "transcripts" / f"{stem}.md"
+        trans_p_alt = storage / "transcripts" / f"{stem}.md"
         if trans_p_alt.exists():
             trans_p_alt.unlink()
 
@@ -940,6 +966,9 @@ def main():
 
     elif cmd == "check-local-whisper":
         print(json.dumps(check_local_whisper()))
+
+    elif cmd == "pick-directory":
+        print(json.dumps(pick_directory()))
 
     elif cmd == "read-file":
         target = sys.argv[2]

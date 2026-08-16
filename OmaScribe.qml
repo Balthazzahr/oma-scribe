@@ -31,6 +31,7 @@ BarWidget {
     groq_model: "llama-3.3-70b-versatile",
     openai_model: "gpt-4o-mini",
     local_model: "base",
+    storage_path: "",
     auto_transcribe_on_stop: true,
     default_mode: "meeting"
   })
@@ -53,13 +54,18 @@ BarWidget {
     checkWhisperProc.running = true
   }
 
+  function pickDirectory() {
+    pickDirProc.command = ["python3", enginePath, "pick-directory"]
+    pickDirProc.running = true
+  }
+
   function copyText(val) {
     copyProc.command = ["wl-copy", val]
     copyProc.running = true
   }
 
   property var historyList: []
-  property int activeTabIndex: 0 // 0: record, 1: history, 2: settings
+  property int activeTabIndex: 0 // 0: record, 1: notes, 2: settings
   property string historyFilter: "all" // "all" | "meetings" | "memos"
   property string selectedMode: "meeting"
   property int elapsedSeconds: 0
@@ -179,7 +185,8 @@ BarWidget {
   }
 
   function openFolder() {
-    execProc.command = ["xdg-open", Quickshell.env("HOME") + "/Documents/AudioNotes"]
+    var p = root.settingsObj.storage_path || (Quickshell.env("HOME") + "/Documents/AudioNotes")
+    execProc.command = ["xdg-open", p]
     execProc.running = true
   }
 
@@ -280,6 +287,26 @@ BarWidget {
   Process { id: execProc }
   Process { id: editorProc }
   Process { id: copyProc }
+
+  Process {
+    id: pickDirProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "").trim()
+        if (!raw) return
+        try {
+          var res = JSON.parse(raw)
+          if (res.status === "ok" && res.path) {
+            root.settingsObj.storage_path = res.path
+            storagePathInput.text = res.path
+            root.saveFeedbackText = "✓ Storage folder updated!"
+            feedbackTimer.restart()
+          }
+        } catch(e) {}
+      }
+    }
+  }
 
   Process {
     id: checkWhisperProc
@@ -450,7 +477,7 @@ BarWidget {
         Repeater {
           model: [
             { idx: 0, label: "󰑊 Record" },
-            { idx: 1, label: "󰋚 History" },
+            { idx: 1, label: "󰈙 Notes" },
             { idx: 2, label: "󰒓 Settings" }
           ]
 
@@ -699,7 +726,7 @@ BarWidget {
                 anchors.centerIn: parent
                 spacing: 6
                 Text {
-                  text: "󰵅"
+                  text: "󰤨"
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: Style.font.body
                   color: root.selectedMode === "meeting" ? Color.accent : Color.foreground
@@ -1360,7 +1387,7 @@ BarWidget {
                 anchors.centerIn: parent
                 spacing: 6
                 Text {
-                  text: root.selectedMode === "meeting" ? "󰵅" : "󰍬"
+                  text: root.selectedMode === "meeting" ? "󰤨" : "󰍬"
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 11
                   color: Color.accent
@@ -1413,19 +1440,11 @@ BarWidget {
                 }
               }
             }
-
-            Text {
-              Layout.alignment: Qt.AlignHCenter
-              text: root.stateObj.status_message ? ("Status: " + root.stateObj.status_message) : "Tip: Right-click the bar icon anytime to instant-toggle recording"
-              font.family: "JetBrainsMono Nerd Font"
-              font.pixelSize: 10
-              color: Color.muted
-            }
           }
         }
 
         // ------------------------------------------
-        // TAB 1: HISTORY VIEW (WITH DELETE BUTTON & DIRECT ACTIONS)
+        // TAB 1: NOTES VIEW (WITH DELETE BUTTON & DIRECT ACTIONS)
         // ------------------------------------------
         ColumnLayout {
           Layout.fillWidth: true
@@ -1440,7 +1459,7 @@ BarWidget {
             Repeater {
               model: [
                 { id: "all", label: "󰈙 All" },
-                { id: "meetings", label: "󰵅 Meeting Notes" },
+                { id: "meetings", label: "󰤨 Meeting Notes" },
                 { id: "memos", label: "󰍬 Audio Notes" }
               ]
 
@@ -1534,7 +1553,7 @@ BarWidget {
                     Layout.fillWidth: true
                     spacing: 6
                     Text {
-                      text: modelData.mode === "meeting" ? "󰵅" : "󰍬"
+                      text: modelData.mode === "meeting" ? "󰤨" : "󰍬"
                       font.family: "JetBrainsMono Nerd Font"
                       font.pixelSize: Style.font.small
                       color: Color.accent
@@ -2194,6 +2213,71 @@ BarWidget {
               }
             }
 
+            // Section 5: Storage Folder Location
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 6
+
+              Text {
+                text: "Storage Location (Notes & Recordings):"
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: Style.font.small
+                color: Color.foreground
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Rectangle {
+                  Layout.fillWidth: true
+                  Layout.preferredHeight: 36
+                  radius: 6
+                  clip: true
+                  color: Util.alpha(Color.foreground, 0.08)
+                  border.width: 1
+                  border.color: storagePathInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
+
+                  TextInput {
+                    id: storagePathInput
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    verticalAlignment: TextInput.AlignVCenter
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: Style.font.small
+                    color: Color.foreground
+                    text: root.settingsObj.storage_path || (Quickshell.env("HOME") + "/Documents/AudioNotes")
+                    onTextChanged: root.settingsObj.storage_path = text
+                  }
+                }
+
+                // Browse Button (opens Zenity directory picker)
+                Rectangle {
+                  width: 92
+                  height: 36
+                  radius: 6
+                  color: browseMouse.containsMouse ? Util.alpha(Color.accent, 0.3) : Util.alpha(Color.accent, 0.15)
+
+                  RowLayout {
+                    anchors.centerIn: parent
+                    spacing: 4
+                    Text { text: "󰉋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: Color.accent }
+                    Text { text: "Browse"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
+                  }
+
+                  MouseArea {
+                    id: browseMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.pickDirectory()
+                  }
+                }
+              }
+            }
+
             Item { Layout.preferredHeight: 4 }
 
             // Save Settings Button
@@ -2219,6 +2303,7 @@ BarWidget {
                   root.settingsObj.groq_model = root.selectedGroqModel
                   root.settingsObj.openai_model = root.selectedOpenAIModel
                   root.settingsObj.local_model = root.selectedLocalModel
+                  root.settingsObj.storage_path = storagePathInput.text.trim()
                   root.setCurrentApiKey(apiKeyInput.text.trim())
 
                   var settingsJson = JSON.stringify(root.settingsObj)

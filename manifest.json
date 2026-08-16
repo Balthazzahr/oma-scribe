@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "balthazzahr.oma-scribe",
+  "name": "Oma Scribe",
+  "version": "1.0.0",
+  "author": "Balthazzahr",
+  "description": "Smart audio recording, transcription, and meeting notes generator for Teams/Zoom/online meetings and voice memos.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "OmaScribe.qml"
+  },
+  "barWidget": {
+    "displayName": "Oma Scribe",
+    "description": "Record online meetings or voice memos, transcribe, and synthesize AI structured meeting notes",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

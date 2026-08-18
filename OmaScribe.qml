@@ -71,7 +71,7 @@ BarWidget {
     meetingAttendeesText = ""
   }
 
-  implicitWidth: Math.max(button.implicitWidth, (root.stateObj.is_recording || root.stateObj.is_processing) ? 82 : 36)
+  implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   // --- ENGINE PROCESSES ---
@@ -459,48 +459,22 @@ BarWidget {
     root.updateStatus()
   }
 
-  // --- BAR WIDGET BUTTON (FEATHER ICON & JIGGLE ANIMATION) ---
+  // --- BAR WIDGET BUTTON (FEATHER ICON ON BAR) ---
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     horizontalMargin: 6
     verticalPadding: 4
-    text: ""
 
-    RowLayout {
-      anchors.centerIn: parent
-      spacing: 6
-
-      Text {
-        id: barQuillIcon
-        text: "\udb81\uded3"
-        font.family: "JetBrainsMono Nerd Font"
-        font.pixelSize: Style.font.body
-        color: root.stateObj.is_recording ? Color.urgent : (root.stateObj.is_processing ? Color.accent : Color.foreground)
-        transformOrigin: Item.Center
-
-        SequentialAnimation on rotation {
-          running: root.stateObj.is_processing
-          loops: Animation.Infinite
-          NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
-          NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
-          NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
-        }
+    text: {
+      if (root.stateObj.is_recording) {
+        return "\udb81\uded3 " + root.formatDuration(root.elapsedSeconds)
       }
-
-      Text {
-        visible: root.stateObj.is_recording || root.stateObj.is_processing
-        text: {
-          if (root.stateObj.is_recording) return root.formatDuration(root.elapsedSeconds)
-          if (root.stateObj.is_processing) return root.formatDuration(root.transcribeElapsedSeconds)
-          return ""
-        }
-        font.family: "JetBrainsMono Nerd Font"
-        font.bold: true
-        font.pixelSize: Style.font.body
-        color: root.stateObj.is_recording ? Color.urgent : (root.stateObj.is_processing ? Color.accent : Color.foreground)
+      if (root.stateObj.is_processing) {
+        return "\udb81\uded3 " + root.formatDuration(root.transcribeElapsedSeconds)
       }
+      return "\udb81\uded3"
     }
 
     onPressed: function(btn) {

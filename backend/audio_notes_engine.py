@@ -638,14 +638,17 @@ def get_available_groq_models(api_key):
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = [m.get("id") for m in data.get("data", []) if m.get("id")]
-            # Exclude guardrails, safety classifiers, audio, speech
-            excluded = ["guard", "whisper", "orpheus", "tts", "embedding", "safeguard", "moderation"]
+            # Exclude guardrails, safety classifiers, audio, speech, and restricted models
+            excluded = [
+                "guard", "whisper", "orpheus", "tts", "embedding", "safeguard",
+                "moderation", "canopylabs", "allam"
+            ]
             chat_models = [m for m in models if not any(k in m.lower() for k in excluded)]
             return chat_models
     except Exception:
         return []
 
-def call_groq_chat(messages, api_key, model_list=None, max_tokens=4096):
+def call_groq_chat(messages, api_key, model_list=None, max_tokens=3000):
     """Calls Groq chat completion with automatic model fallback across active LLMs."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     clean_key = (api_key or "").strip()
@@ -653,7 +656,11 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=4096):
     if not model_list:
         model_list = get_available_groq_models(clean_key)
         if not model_list:
-            model_list = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b"]
+            model_list = [
+                "meta-llama/llama-4-scout-17b-16e-instruct",
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant"
+            ]
 
     last_errors = []
     for m in model_list:
@@ -681,6 +688,9 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=4096):
         except urllib.error.HTTPError as e:
             err_msg = extract_http_error(e)
             last_errors.append(f"{m} -> {err_msg}")
+            # If rate limited (429) or payload too large for model TPM (413), backoff briefly
+            if e.code in (429, 413, 503):
+                time.sleep(2.0)
             continue
         except Exception as e:
             last_errors.append(f"{m} -> {str(e)}")
@@ -692,7 +702,7 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=4096):
 def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_key="", model="llama-3.1-70b-versatile", metadata=None):
     """
     Submits verbatim transcript to Groq LLM for structured synthesis (~1s).
-    Automatically chunks large transcripts (>20,000 chars) to prevent TPM rate limits.
+    Automatically chunks large transcripts (>8,000 chars) to prevent TPM rate limits.
     """
     clean_key = (api_key or "").strip()
     meta = metadata or {}
@@ -722,7 +732,7 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
                 att_list.append(f"- {a.strip()}")
         attendee_lines = "\n".join(att_list)
 
-    # Rank available models
+    # Rank available models by capacity and TPM limits
     active_models = get_available_groq_models(clean_key)
     models_to_try = []
     if model and (not active_models or model in active_models):
@@ -731,23 +741,26 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
     if active_models:
         def model_score(name):
             n = name.lower()
-            if "70b" in n: return 100
-            if "compound" in n: return 90
-            if "32b" in n or "27b" in n: return 80
-            if "deepseek" in n: return 75
-            if "qwen" in n: return 70
-            if "llama" in n: return 60
+            # 1. Highest TPM allowance (30k TPM)
+            if "llama-4-scout" in n or "llama-4" in n: return 120
+            # 2. Flagship note synthesis (12k TPM)
+            if "llama-3.3-70b" in n or "70b" in n: return 100
+            if "llama-3.1-8b" in n or "8b" in n: return 85
+            if "compound" in n: return 80
+            if "gpt-oss-120b" in n: return 75
+            if "gpt-oss-20b" in n: return 70
+            if "qwen" in n: return 65
+            if "deepseek" in n: return 60
             if "gemma" in n: return 50
-            if "8b" in n: return 40
             return 10
         sorted_active = sorted(active_models, key=model_score, reverse=True)
         for m in sorted_active:
             if m not in models_to_try:
                 models_to_try.append(m)
 
-    # If transcript is very large (>18,000 chars), summarize sections first to avoid TPM overflow
+    # If transcript is large (>8,000 chars), summarize sections first to stay well under TPM limits
     processed_transcript = transcript_text
-    if len(transcript_text) > 18000:
+    if len(transcript_text) > 8000:
         update_progress("Synthesizing multi-part meeting transcript in sections...", 65)
         lines = transcript_text.split("\n")
         chunks = []
@@ -756,7 +769,7 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
         for l in lines:
             cur_chunk.append(l)
             cur_len += len(l) + 1
-            if cur_len >= 12000:
+            if cur_len >= 6500:
                 chunks.append("\n".join(cur_chunk))
                 cur_chunk = []
                 cur_len = 0
@@ -771,9 +784,11 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
                 [{"role": "user", "content": sec_prompt}],
                 api_key=clean_key,
                 model_list=models_to_try,
-                max_tokens=1500
+                max_tokens=1000
             )
             section_summaries.append(f"### Meeting Segment {idx+1}\n{sec_res}")
+            if idx < len(chunks) - 1:
+                time.sleep(1.5)  # Brief delay to prevent burst token usage
 
         processed_transcript = "## Sectional Syntheses from Verbatim Transcript:\n" + "\n\n".join(section_summaries)
 

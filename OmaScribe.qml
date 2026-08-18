@@ -471,9 +471,6 @@ BarWidget {
       if (root.stateObj.is_recording) {
         return "\udb81\uded3 " + root.formatDuration(root.elapsedSeconds)
       }
-      if (root.stateObj.is_processing) {
-        return "\udb81\uded3 " + root.formatDuration(root.transcribeElapsedSeconds)
-      }
       return "\udb81\uded3"
     }
 

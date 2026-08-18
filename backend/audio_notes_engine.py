@@ -646,9 +646,21 @@ def get_available_groq_models(api_key):
             chat_models = [m for m in models if not any(k in m.lower() for k in excluded)]
             return chat_models
     except Exception:
-        return []
+        return ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
 
-def call_groq_chat(messages, api_key, model_list=None, max_tokens=1500):
+def strip_think_tags(text):
+    """Strips internal thinking/reasoning blocks emitted by reasoning models like GPT-OSS / DeepSeek."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL)
+    cleaned = re.sub(r"</?think>", "", cleaned)
+    # If reasoning preamble exists before markdown headers, extract starting at the first header
+    if "## " in cleaned:
+        idx = cleaned.find("## ")
+        cleaned = cleaned[idx:]
+    return cleaned.strip()
+
+def call_groq_chat(messages, api_key, model_list=None, max_tokens=1200):
     """Calls Groq chat completion with automatic model fallback across active LLMs."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     clean_key = (api_key or "").strip()
@@ -657,9 +669,9 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=1500):
         model_list = get_available_groq_models(clean_key)
         if not model_list:
             model_list = [
-                "meta-llama/llama-4-scout-17b-16e-instruct",
-                "llama-3.3-70b-versatile",
-                "llama-3.1-8b-instant"
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.6-27b"
             ]
 
     last_errors = []
@@ -667,7 +679,7 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=1500):
         payload = {
             "model": m,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": 0.1,
             "max_tokens": max_tokens
         }
         req = urllib.request.Request(
@@ -684,7 +696,9 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=1500):
                 res_data = json.loads(resp.read().decode("utf-8"))
                 choices = res_data.get("choices", [])
                 if choices and choices[0].get("message"):
-                    return choices[0]["message"].get("content", "").strip(), m
+                    raw_content = choices[0]["message"].get("content", "").strip()
+                    cleaned_content = strip_think_tags(raw_content)
+                    return cleaned_content, m
         except urllib.error.HTTPError as e:
             err_msg = extract_http_error(e)
             last_errors.append(f"{m} -> {err_msg}")
@@ -698,6 +712,109 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=1500):
 
     err_summary = " | ".join(last_errors) if last_errors else "All models failed"
     raise RuntimeError(f"Groq note synthesis failed: {err_summary}")
+
+def sanitize_whisper_prompt(raw_text):
+    """
+    Strips brackets, metadata labels, and gender keywords so Whisper receives
+    only clean proper nouns and terminology, preventing Whisper decoder prompt looping.
+    """
+    if not raw_text:
+        return ""
+    # Remove bracketed metadata like (Male), (Female), [Host]
+    t = re.sub(r'[\(\[\{][^\)\]\}]*[\)\]\}]', ' ', str(raw_text))
+    # Remove gender words and special symbols
+    t = re.sub(r'\b(male|female|host|attendee|attendees)\b', ' ', t, flags=re.IGNORECASE)
+    t = re.sub(r'[^a-zA-Z0-9\s,.-]', ' ', t)
+    # Collapse multiple commas / spaces
+    t = ", ".join([w.strip() for w in t.split(",") if w.strip()])
+    return t[:350]
+
+def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
+    """
+    Takes timestamped Whisper output ([MM:SS] Text) and maps speaker names ([MM:SS] Name: Text)
+    using conversational context and attendee list.
+    """
+    if not raw_transcript or not raw_transcript.strip():
+        return raw_transcript
+
+    if not attendees_meta:
+        return raw_transcript
+
+    # Format attendee guidance for LLM
+    if isinstance(attendees_meta, list):
+        att_desc = []
+        for a in attendees_meta:
+            if isinstance(a, dict) and a.get("name"):
+                sex = a.get("sex", "")
+                att_desc.append(f"- {a['name']}" + (f" ({sex})" if sex else ""))
+            elif isinstance(a, str) and a.strip():
+                att_desc.append(f"- {a.strip()}")
+        att_str = "\n".join(att_desc)
+    else:
+        att_str = str(attendees_meta).strip()
+
+    if not att_str or "AttendeeONE" in att_str:
+        return raw_transcript
+
+    lines = [l.strip() for l in raw_transcript.split("\n") if l.strip()]
+    if not lines:
+        return raw_transcript
+
+    # Chunk lines into batches of ~35 lines (~2,500 chars) for reliable attribution
+    batch_size = 35
+    batches = [lines[i:i+batch_size] for i in range(0, len(lines), batch_size)]
+    attributed_lines = []
+
+    sys_prompt = (
+        "You are an expert audio transcriptionist and speaker diarization specialist. "
+        "Your task is to take a timestamped transcript and attribute each dialogue turn to the correct speaker "
+        "based on the provided attendee list, their genders/roles, conversational tone, and speech flow.\n\n"
+        "RULES:\n"
+        "1. Output ONLY lines formatted as: [HH:MM:SS] Speaker Name: Spoken text (or [MM:SS] Speaker Name: Spoken text).\n"
+        "2. Do NOT summarize or alter spoken words. Preserve verbatim speech.\n"
+        "3. If speaker is uncertain, use the most plausible attendee name.\n"
+        "4. Do NOT add any preamble, thinking process, conversational greeting, or markdown headers."
+    )
+
+    models_to_try = get_available_groq_models(api_key)
+    if not models_to_try:
+        models_to_try = [
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.6-27b"
+        ]
+
+    for idx, batch in enumerate(batches):
+        batch_text = "\n".join(batch)
+        user_prompt = f"Meeting Attendees:\n{att_str}\n\nTimestamped Transcript to Attribute:\n{batch_text}"
+        try:
+            res, _ = call_groq_chat(
+                [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                api_key=api_key,
+                model_list=models_to_try,
+                max_tokens=1500
+            )
+            clean_res = res.strip()
+            # Extract ONLY valid timestamped dialogue lines
+            parsed_lines = [
+                l.strip()
+                for l in clean_res.split("\n")
+                if re.match(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]", l.strip())
+            ]
+            if parsed_lines:
+                attributed_lines.extend(parsed_lines)
+            else:
+                attributed_lines.append(batch_text)
+        except Exception:
+            attributed_lines.append(batch_text)
+
+        if idx < len(batches) - 1:
+            time.sleep(0.5)
+
+    return "\n".join(attributed_lines).strip()
 
 def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_key="", model="llama-3.1-70b-versatile", metadata=None):
     """
@@ -778,7 +895,11 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
         section_summaries = []
         for idx, ch in enumerate(chunks):
             update_progress(f"Synthesizing section {idx+1}/{len(chunks)}...", 65 + int(idx * 15 / len(chunks)))
-            sec_prompt = f"Summarize key discussion points, context, decisions, and action items with timestamps from this section of the meeting transcript:\n\n{ch}"
+            sec_prompt = (
+                "Summarize factual key discussion points, context, explicitly agreed decisions, and stated action items from this transcript section.\n"
+                "STRICT RULES: Do NOT invent deadlines or assume unstated facts.\n\n"
+                f"{ch}"
+            )
             sec_res, _ = call_groq_chat(
                 [{"role": "user", "content": sec_prompt}],
                 api_key=clean_key,
@@ -797,7 +918,14 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
     update_progress("Generating final executive meeting record...", 85)
 
     if mode == "meeting":
-        system_prompt = "You are an executive meeting analyst and transcription synthesizer. Your job is to transform verbatim meeting transcripts into comprehensive, well-structured, professional meeting records with complete action items and decision logs."
+        system_prompt = (
+            "You are a rigorous, executive meeting analyst. Your job is to transform meeting transcripts into factual, highly structured, professional meeting records.\n\n"
+            "CRITICAL FACTUAL ACCURACY RULES:\n"
+            "1. STRICT FACTUAL FIDELITY: Base all notes, findings, summaries, and points STRICTLY on statements explicitly made in the transcript. Do NOT invent, assume, or extrapolate facts.\n"
+            "2. NO FABRICATED TIMELINES: Do NOT invent arbitrary deadlines (e.g. '5 business days', '10 business days') unless explicitly spoken by a participant. If no timeline was agreed upon, write 'Not specified'.\n"
+            "3. NO INVENTED PROCEDURES OR ACTION ITEMS: Only document action items and decisions that were explicitly agreed or assigned. If no formal action items or decisions were made, explicitly state 'No formal action items assigned' or 'No formal decisions reached in this session'.\n"
+            "4. SPEAKER ACCURACY: Attribute statements and viewpoints accurately to the correct participants as identified in the transcript."
+        )
         user_prompt = f"""Generate a detailed meeting record based on this meeting context and transcript:
 
 =====================
@@ -842,7 +970,12 @@ Output structured markdown precisely as follows:
 
 ## Next Steps & Follow-ups"""
     else:
-        system_prompt = "You are an expert audio note synthesizer. Your job is to transform voice memos and spoken thoughts into structured, crystal-clear notes and action items."
+        system_prompt = (
+            "You are an expert audio note synthesizer. Your job is to transform voice memos and spoken thoughts into structured, crystal-clear notes and action items.\n\n"
+            "CRITICAL FACTUAL ACCURACY RULES:\n"
+            "1. STRICT FACTUAL FIDELITY: Base all notes strictly on what was actually said. Do NOT invent facts or deadlines.\n"
+            "2. CLEAR ACTION ITEMS: Only list action items that were explicitly mentioned by the speaker."
+        )
         user_prompt = f"""Generate a structured note based on this audio transcript:
 
 =====================
@@ -967,18 +1100,21 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
         attendees = meta.get("attendees", [])
         if isinstance(attendees, str):
             if "AttendeeONE" in attendees or "AttendeeTWO" in attendees:
-                prompt_hint = ""
+                prompt_raw = ""
             else:
-                prompt_hint = attendees
+                prompt_raw = attendees
         elif isinstance(attendees, list):
-            prompt_hint = ", ".join(a.get("name", "") if isinstance(a, dict) else str(a) for a in attendees if "AttendeeONE" not in str(a))
-        else:
-            prompt_hint = ""
+            prompt_raw = ", ".join(a.get("name", "") if isinstance(a, dict) else str(a) for a in attendees if "AttendeeONE" not in str(a))
+        # Whisper prompt is left clean/empty to prevent Whisper autoregressive looping in pauses
         update_progress("Transcribing audio on Groq LPUs (Whisper Large v3)...", 35, current_model="Whisper Large v3")
 
-        transcript_text = transcribe_audio_with_groq(str(audio_path), api_key=api_key, prompt=prompt_hint)
+        raw_transcript = transcribe_audio_with_groq(str(audio_path), api_key=api_key, prompt="")
 
-        # 2. SAVE TRANSCRIPT IMMEDIATELY so verbatim output is guaranteed preserved!
+        # 2. Attribute Speakers & Format Verbatim Transcript
+        update_progress("Attributing speakers and formatting transcript...", 55, current_model="Groq LLM")
+        transcript_text = attribute_speakers_in_transcript(raw_transcript, attendees, api_key=api_key)
+
+        # 3. SAVE TRANSCRIPT IMMEDIATELY so verbatim output is guaranteed preserved!
         notes_fmt = settings.get("notes_format", "md").lower()
         formatted_trans = format_notes_content(transcript_text, notes_fmt)
         transcript_file = note_dir / f"transcript.{notes_fmt}"
@@ -988,8 +1124,8 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
         meta["has_transcript"] = True
         save_note_metadata(note_dir, meta)
 
-        # 3. Synthesize structured notes
-        update_progress(f"Synthesizing meeting notes...", 70, current_model="Groq LLM")
+        # 4. Synthesize structured notes
+        update_progress(f"Synthesizing meeting notes...", 75, current_model="Groq LLM")
         notes_md, model_used = synthesize_notes_with_groq(
             transcript_text=transcript_text,
             mode=mode,
@@ -999,7 +1135,7 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
             metadata=meta
         )
 
-        # 4. Format & Save Notes
+        # 5. Format & Save Notes
         update_progress("Writing notes.md...", 95, current_model=model_used)
         formatted_notes = format_notes_content(notes_md, notes_fmt)
         notes_file = note_dir / f"notes.{notes_fmt}"

@@ -1167,56 +1167,124 @@ BarWidget {
             visible: root.isReaderOpen && !!root.currentReaderItem
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 8
+            spacing: 10
 
-            // Top Reader Navigation & Action Bar
+            // ==========================================
+            // READER HEADER ROW 1: Navigation & Title
+            // ==========================================
             RowLayout {
               Layout.fillWidth: true
-              spacing: 8
+              spacing: 10
 
               // Back Button
               Rectangle {
-                width: 86
-                height: 32
+                width: 96
+                height: 34
                 radius: 6
-                color: Util.alpha(Color.foreground, 0.08)
+                color: backHover.containsMouse ? Util.alpha(Color.foreground, 0.14) : Util.alpha(Color.foreground, 0.08)
                 RowLayout {
                   anchors.centerIn: parent
-                  spacing: 4
-                  Text { text: "󰁍"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: Color.foreground }
+                  spacing: 6
+                  Text { text: "󰁍"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.foreground }
                   Text { text: "Library"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.foreground }
                 }
                 MouseArea {
+                  id: backHover
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: root.isReaderOpen = false
                 }
               }
 
-              // Title and Mode Badge
+              // Title and Date/Size Subtitle
               ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 0
+                spacing: 1
                 Text {
                   text: root.currentReaderItem ? root.currentReaderItem.title : ""
                   font.family: "JetBrainsMono Nerd Font"
                   font.bold: true
-                  font.pixelSize: Style.font.body
+                  font.pixelSize: Style.font.body + 2
                   color: Color.foreground
                   elide: Text.ElideRight
                 }
                 Text {
-                  text: root.currentReaderItem ? (root.currentReaderItem.date + " • " + root.currentReaderItem.size_kb + " KB") : ""
+                  text: root.currentReaderItem ? (root.currentReaderItem.date + " • " + root.currentReaderItem.size_kb + " KB" + (root.currentReaderItem.has_notes ? " • Notes Ready" : " • Audio Only")) : ""
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 10
                   color: Color.muted
                 }
               }
 
+              // External Editor Button
+              Rectangle {
+                width: 34
+                height: 34
+                radius: 6
+                color: edHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
+                Text {
+                  anchors.centerIn: parent
+                  text: "󰏫"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.pixelSize: 14
+                  color: Color.foreground
+                }
+                ToolTip.visible: edHover.containsMouse
+                ToolTip.text: "Open raw note in external editor"
+                ToolTip.delay: 300
+                MouseArea {
+                  id: edHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (!root.currentReaderItem) return
+                    var fp = root.activeReaderSubTab === 0 ? root.currentReaderItem.notes_file : root.currentReaderItem.transcript_file
+                    root.openInEditor(fp || root.currentReaderItem.audio_file)
+                  }
+                }
+              }
+
+              // Folder Button
+              Rectangle {
+                width: 34
+                height: 34
+                radius: 6
+                color: folHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
+                Text {
+                  anchors.centerIn: parent
+                  text: "󰉋"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.pixelSize: 14
+                  color: Color.foreground
+                }
+                ToolTip.visible: folHover.containsMouse
+                ToolTip.text: "Open folder in file manager"
+                ToolTip.delay: 300
+                MouseArea {
+                  id: folHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (root.currentReaderItem) root.openFolder(root.currentReaderItem.folder)
+                  }
+                }
+              }
+            }
+
+            // ==========================================
+            // READER HEADER ROW 2: Sub-Tabs & Action Toolbar
+            // ==========================================
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+
               // Sub-Tabs: Notes vs Transcript
               Rectangle {
-                Layout.preferredHeight: 32
-                Layout.preferredWidth: 220
+                Layout.preferredHeight: 34
+                Layout.preferredWidth: 260
                 radius: 6
                 color: Util.alpha(Color.foreground, 0.08)
 
@@ -1232,9 +1300,9 @@ BarWidget {
                     color: root.activeReaderSubTab === 0 ? Color.accent : "transparent"
                     RowLayout {
                       anchors.centerIn: parent
-                      spacing: 4
-                      Text { text: "󰎚"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
-                      Text { text: "Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      spacing: 5
+                      Text { text: "󰎚"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      Text { text: "Structured Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
                     }
                     MouseArea {
                       anchors.fill: parent
@@ -1250,8 +1318,8 @@ BarWidget {
                     color: root.activeReaderSubTab === 1 ? Color.accent : "transparent"
                     RowLayout {
                       anchors.centerIn: parent
-                      spacing: 4
-                      Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      spacing: 5
+                      Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
                       Text { text: "Transcript"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
                     }
                     MouseArea {
@@ -1263,22 +1331,67 @@ BarWidget {
                 }
               }
 
+              Item { Layout.fillWidth: true }
+
+              // Copy Feedback Toast
+              Text {
+                visible: !!root.copyFeedbackText
+                text: root.copyFeedbackText
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: 10
+                color: Color.accent
+              }
+
+              // Re-transcribe Button
+              Rectangle {
+                width: 120
+                height: 34
+                radius: 6
+                color: retransHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 5
+                  Text { text: "󱐋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: Color.foreground }
+                  Text { text: "Re-transcribe"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.foreground }
+                }
+                ToolTip.visible: retransHover.containsMouse
+                ToolTip.text: "Re-run Whisper transcription & AI note synthesis"
+                ToolTip.delay: 300
+                MouseArea {
+                  id: retransHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (root.currentReaderItem) {
+                      root.triggerTranscribe(root.currentReaderItem.audio_file, root.currentReaderItem.mode, root.currentReaderItem.title, "")
+                    }
+                  }
+                }
+              }
+
               // Copy Button
               Rectangle {
-                width: 76
-                height: 32
+                width: 86
+                height: 34
                 radius: 6
                 color: Util.alpha(Color.accent, 0.18)
                 border.width: 1
                 border.color: Color.accent
                 RowLayout {
                   anchors.centerIn: parent
-                  spacing: 4
-                  Text { text: "󰆏"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: Color.accent }
+                  spacing: 5
+                  Text { text: "󰆏"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: Color.accent }
                   Text { text: "Copy"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
                 }
+                ToolTip.visible: copyHover.containsMouse
+                ToolTip.text: root.activeReaderSubTab === 0 ? "Copy structured notes to clipboard" : "Copy verbatim transcript to clipboard"
+                ToolTip.delay: 300
                 MouseArea {
+                  id: copyHover
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     var txt = root.activeReaderSubTab === 0 ? root.activeReaderNotesText : root.activeReaderTransText
@@ -1286,63 +1399,6 @@ BarWidget {
                   }
                 }
               }
-
-              // External Editor Button
-              Rectangle {
-                width: 32
-                height: 32
-                radius: 6
-                color: Util.alpha(Color.foreground, 0.08)
-                Text {
-                  anchors.centerIn: parent
-                  text: "󰏫"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 13
-                  color: Color.foreground
-                }
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    if (!root.currentReaderItem) return
-                    var fp = root.activeReaderSubTab === 0 ? root.currentReaderItem.notes_file : root.currentReaderItem.transcript_file
-                    root.openInEditor(fp || root.currentReaderItem.audio_file)
-                  }
-                }
-              }
-
-              // Folder Button
-              Rectangle {
-                width: 32
-                height: 32
-                radius: 6
-                color: Util.alpha(Color.foreground, 0.08)
-                Text {
-                  anchors.centerIn: parent
-                  text: "󰉋"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 13
-                  color: Color.foreground
-                }
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    if (root.currentReaderItem) root.openFolder(root.currentReaderItem.folder)
-                  }
-                }
-              }
-            }
-
-            // Copy Feedback Toast
-            Text {
-              visible: !!root.copyFeedbackText
-              Layout.alignment: Qt.AlignRight
-              text: root.copyFeedbackText
-              font.family: "JetBrainsMono Nerd Font"
-              font.bold: true
-              font.pixelSize: 10
-              color: Color.accent
             }
 
             // Text Reader View Box
@@ -1588,99 +1644,119 @@ BarWidget {
                         }
                       }
 
-                      // Action Button 1: Notes (Opens In-App Reader)
-                      Rectangle {
-                        visible: modelData.has_notes
-                        width: 72
-                        height: 28
-                        radius: 5
-                        color: Util.alpha(Color.accent, 0.15)
-                        RowLayout {
-                          anchors.centerIn: parent
-                          spacing: 4
-                          Text { text: "󰎚"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.accent }
-                          Text { text: "Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 10; color: Color.accent }
-                        }
-                        MouseArea {
-                          anchors.fill: parent
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.openReader(modelData, 0)
-                        }
-                      }
+                      // Uniform 4-Button Action Toolbar (Notes, Transcript, Transcribe, Delete)
+                      RowLayout {
+                        spacing: 6
 
-                      // Action Button 2: Transcript (Opens In-App Reader)
-                      Rectangle {
-                        visible: modelData.has_transcript
-                        width: 86
-                        height: 28
-                        radius: 5
-                        color: Util.alpha(Color.foreground, 0.08)
-                        RowLayout {
-                          anchors.centerIn: parent
-                          spacing: 4
-                          Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.foreground }
-                          Text { text: "Transcript"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 10; color: Color.foreground }
-                        }
-                        MouseArea {
-                          anchors.fill: parent
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.openReader(modelData, 1)
-                        }
-                      }
-
-                      // Transcribe Button
-                      Rectangle {
-                        width: isTranscribingThis ? 110 : (modelData.has_notes ? 32 : 96)
-                        height: 28
-                        radius: 5
-                        color: isTranscribingThis ? Util.alpha(Color.accent, 0.25) : (modelData.has_notes ? Util.alpha(Color.foreground, 0.08) : Color.accent)
-
-                        RowLayout {
-                          anchors.centerIn: parent
-                          spacing: 4
+                        // Button 1: Notes Icon Button (32x32)
+                        Rectangle {
+                          width: 32
+                          height: 32
+                          radius: 5
+                          color: modelData.has_notes ? (notesBtnArea.containsMouse ? Util.alpha(Color.accent, 0.28) : Util.alpha(Color.accent, 0.16)) : Util.alpha(Color.foreground, 0.04)
+                          opacity: modelData.has_notes ? 1.0 : 0.25
                           Text {
+                            anchors.centerIn: parent
+                            text: "󰎚"
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 13
+                            color: modelData.has_notes ? Color.accent : Color.muted
+                          }
+                          ToolTip.visible: notesBtnArea.containsMouse
+                          ToolTip.text: modelData.has_notes ? "View Structured Notes" : "No notes generated yet"
+                          ToolTip.delay: 250
+                          MouseArea {
+                            id: notesBtnArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: modelData.has_notes
+                            cursorShape: modelData.has_notes ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: root.openReader(modelData, 0)
+                          }
+                        }
+
+                        // Button 2: Transcript Icon Button (32x32)
+                        Rectangle {
+                          width: 32
+                          height: 32
+                          radius: 5
+                          color: modelData.has_transcript ? (transBtnArea.containsMouse ? Util.alpha(Color.foreground, 0.16) : Util.alpha(Color.foreground, 0.08)) : Util.alpha(Color.foreground, 0.04)
+                          opacity: modelData.has_transcript ? 1.0 : 0.25
+                          Text {
+                            anchors.centerIn: parent
+                            text: "󰔊"
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 13
+                            color: modelData.has_transcript ? Color.foreground : Color.muted
+                          }
+                          ToolTip.visible: transBtnArea.containsMouse
+                          ToolTip.text: modelData.has_transcript ? "View Verbatim Transcript" : "No transcript generated yet"
+                          ToolTip.delay: 250
+                          MouseArea {
+                            id: transBtnArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: modelData.has_transcript
+                            cursorShape: modelData.has_transcript ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: root.openReader(modelData, 1)
+                          }
+                        }
+
+                        // Button 3: Transcribe / Re-Transcribe Icon Button (32x32)
+                        Rectangle {
+                          width: 32
+                          height: 32
+                          radius: 5
+                          color: isTranscribingThis
+                            ? Util.alpha(Color.accent, 0.35)
+                            : (!modelData.has_notes
+                              ? (runTransArea.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.85))
+                              : (runTransArea.containsMouse ? Util.alpha(Color.foreground, 0.16) : Util.alpha(Color.foreground, 0.08)))
+                          Text {
+                            anchors.centerIn: parent
                             text: isTranscribingThis ? "󰑮" : "󱐋"
                             font.family: "JetBrainsMono Nerd Font"
-                            font.pixelSize: 11
-                            color: isTranscribingThis ? Color.accent : (modelData.has_notes ? Color.foreground : Color.pick("background", "#1e1e2e"))
+                            font.pixelSize: 13
+                            color: isTranscribingThis
+                              ? Color.accent
+                              : (!modelData.has_notes ? Color.pick("background", "#1e1e2e") : Color.foreground)
                           }
+                          ToolTip.visible: runTransArea.containsMouse
+                          ToolTip.text: isTranscribingThis ? "Transcribing in progress..." : (modelData.has_notes ? "Re-transcribe audio with Groq AI" : "Transcribe audio with Groq AI")
+                          ToolTip.delay: 250
+                          MouseArea {
+                            id: runTransArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: !isTranscribingThis
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.triggerTranscribe(modelData.audio_file, modelData.mode, modelData.title, "")
+                          }
+                        }
+
+                        // Button 4: Delete Icon Button (32x32)
+                        Rectangle {
+                          width: 32
+                          height: 32
+                          radius: 5
+                          color: delArea.containsMouse ? Util.alpha(Color.urgent, 0.22) : Util.alpha(Color.foreground, 0.04)
                           Text {
-                            visible: !modelData.has_notes || isTranscribingThis
-                            text: isTranscribingThis ? "Transcribing..." : "Transcribe"
+                            anchors.centerIn: parent
+                            text: "󰅖"
                             font.family: "JetBrainsMono Nerd Font"
-                            font.bold: true
-                            font.pixelSize: 10
-                            color: isTranscribingThis ? Color.accent : Color.pick("background", "#1e1e2e")
+                            font.pixelSize: 13
+                            color: delArea.containsMouse ? Color.urgent : Color.muted
                           }
-                        }
-
-                        MouseArea {
-                          anchors.fill: parent
-                          enabled: !isTranscribingThis
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.triggerTranscribe(modelData.audio_file, modelData.mode, modelData.title, "")
-                        }
-                      }
-
-                      // Trash Button
-                      Rectangle {
-                        width: 28
-                        height: 28
-                        radius: 5
-                        color: trashMouse.containsMouse ? Util.alpha(Color.urgent, 0.2) : "transparent"
-                        Text {
-                          anchors.centerIn: parent
-                          text: "󰅖"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.pixelSize: 11
-                          color: trashMouse.containsMouse ? Color.urgent : Color.muted
-                        }
-                        MouseArea {
-                          id: trashMouse
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.deleteItem(modelData.audio_file)
+                          ToolTip.visible: delArea.containsMouse
+                          ToolTip.text: "Delete recording and notes"
+                          ToolTip.delay: 250
+                          MouseArea {
+                            id: delArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.deleteItem(modelData.audio_file)
+                          }
                         }
                       }
                     }

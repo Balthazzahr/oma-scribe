@@ -194,7 +194,7 @@ BarWidget {
   function openReader(item, subTab) {
     if (!item) return
     root.currentReaderItem = item
-    root.activeReaderSubTab = (subTab !== undefined) ? subTab : (item.has_notes ? 0 : 1)
+    root.activeReaderSubTab = (subTab !== undefined) ? subTab : (item.has_transcript ? 0 : (item.has_notes ? 1 : 0))
     root.activeReaderNotesText = "Loading notes..."
     root.activeReaderTransText = "Loading transcript..."
     root.isReaderOpen = true
@@ -614,7 +614,7 @@ BarWidget {
                   anchors.centerIn: parent
                   spacing: 6
                   Text {
-                    text: "󰎚"
+                    text: "󰈙"
                     font.family: "JetBrainsMono Nerd Font"
                     font.pixelSize: 12
                     color: root.activeTabIndex === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground
@@ -1170,50 +1170,32 @@ BarWidget {
             spacing: 10
 
             // ==========================================
-            // READER HEADER ROW 1: Navigation & Title
+            // READER HEADER ROW 1: Full-Width Title & Top External Actions
             // ==========================================
             RowLayout {
               Layout.fillWidth: true
               spacing: 10
 
-              // Back Button
-              Rectangle {
-                width: 96
-                height: 34
-                radius: 6
-                color: backHover.containsMouse ? Util.alpha(Color.foreground, 0.14) : Util.alpha(Color.foreground, 0.08)
-                RowLayout {
-                  anchors.centerIn: parent
-                  spacing: 6
-                  Text { text: "󰁍"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.foreground }
-                  Text { text: "Library"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.foreground }
-                }
-                MouseArea {
-                  id: backHover
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.isReaderOpen = false
-                }
-              }
-
-              // Title and Date/Size Subtitle
+              // Full-Width Title and Metadata
               ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 1
+                spacing: 2
                 Text {
+                  Layout.fillWidth: true
                   text: root.currentReaderItem ? root.currentReaderItem.title : ""
                   font.family: "JetBrainsMono Nerd Font"
                   font.bold: true
-                  font.pixelSize: Style.font.body + 2
+                  font.pixelSize: Style.font.body + 3
                   color: Color.foreground
                   elide: Text.ElideRight
                 }
                 Text {
+                  Layout.fillWidth: true
                   text: root.currentReaderItem ? (root.currentReaderItem.date + " • " + root.currentReaderItem.size_kb + " KB" + (root.currentReaderItem.has_notes ? " • Notes Ready" : " • Audio Only")) : ""
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 10
                   color: Color.muted
+                  elide: Text.ElideRight
                 }
               }
 
@@ -1231,7 +1213,7 @@ BarWidget {
                   color: Color.foreground
                 }
                 ToolTip.visible: edHover.containsMouse
-                ToolTip.text: "Open raw note in external editor"
+                ToolTip.text: "Open raw file in external editor"
                 ToolTip.delay: 300
                 MouseArea {
                   id: edHover
@@ -1240,7 +1222,7 @@ BarWidget {
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     if (!root.currentReaderItem) return
-                    var fp = root.activeReaderSubTab === 0 ? root.currentReaderItem.notes_file : root.currentReaderItem.transcript_file
+                    var fp = root.activeReaderSubTab === 1 ? root.currentReaderItem.notes_file : root.currentReaderItem.transcript_file
                     root.openInEditor(fp || root.currentReaderItem.audio_file)
                   }
                 }
@@ -1275,13 +1257,37 @@ BarWidget {
             }
 
             // ==========================================
-            // READER HEADER ROW 2: Sub-Tabs & Action Toolbar
+            // READER HEADER ROW 2: Library Back, Sub-Tabs & Action Toolbar
             // ==========================================
             RowLayout {
               Layout.fillWidth: true
               spacing: 8
 
-              // Sub-Tabs: Notes vs Transcript
+              // Back to Library Button (On Row 2 with Sub-Tabs)
+              Rectangle {
+                width: 96
+                height: 34
+                radius: 6
+                color: backHover.containsMouse ? Util.alpha(Color.foreground, 0.14) : Util.alpha(Color.foreground, 0.08)
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 6
+                  Text { text: "󰁍"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.foreground }
+                  Text { text: "Library"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.foreground }
+                }
+                ToolTip.visible: backHover.containsMouse
+                ToolTip.text: "Back to recordings list"
+                ToolTip.delay: 300
+                MouseArea {
+                  id: backHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.isReaderOpen = false
+                }
+              }
+
+              // Sub-Tabs: Transcript (0) first, then Structured Notes (1)
               Rectangle {
                 Layout.preferredHeight: 34
                 Layout.preferredWidth: 260
@@ -1293,6 +1299,7 @@ BarWidget {
                   anchors.margins: 2
                   spacing: 2
 
+                  // Sub-Tab 0: Transcript (Verbatim transcription first)
                   Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -1301,8 +1308,8 @@ BarWidget {
                     RowLayout {
                       anchors.centerIn: parent
                       spacing: 5
-                      Text { text: "󰎚"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
-                      Text { text: "Structured Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      Text { text: "Transcript"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
                     }
                     MouseArea {
                       anchors.fill: parent
@@ -1311,6 +1318,7 @@ BarWidget {
                     }
                   }
 
+                  // Sub-Tab 1: Structured Notes (Document with writing lines)
                   Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -1319,8 +1327,8 @@ BarWidget {
                     RowLayout {
                       anchors.centerIn: parent
                       spacing: 5
-                      Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
-                      Text { text: "Transcript"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      Text { text: "󰈙"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      Text { text: "Structured Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
                     }
                     MouseArea {
                       anchors.fill: parent
@@ -1386,7 +1394,7 @@ BarWidget {
                   Text { text: "Copy"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
                 }
                 ToolTip.visible: copyHover.containsMouse
-                ToolTip.text: root.activeReaderSubTab === 0 ? "Copy structured notes to clipboard" : "Copy verbatim transcript to clipboard"
+                ToolTip.text: root.activeReaderSubTab === 0 ? "Copy verbatim transcript to clipboard" : "Copy structured notes to clipboard"
                 ToolTip.delay: 300
                 MouseArea {
                   id: copyHover
@@ -1394,8 +1402,8 @@ BarWidget {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
-                    var txt = root.activeReaderSubTab === 0 ? root.activeReaderNotesText : root.activeReaderTransText
-                    root.copyText(txt, root.activeReaderSubTab === 0 ? "Notes copied" : "Transcript copied")
+                    var txt = root.activeReaderSubTab === 0 ? root.activeReaderTransText : root.activeReaderNotesText
+                    root.copyText(txt, root.activeReaderSubTab === 0 ? "Transcript copied" : "Notes copied")
                   }
                 }
               }
@@ -1422,7 +1430,7 @@ BarWidget {
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 11
                   color: Color.foreground
-                  text: root.activeReaderSubTab === 0 ? root.activeReaderNotesText : root.activeReaderTransText
+                  text: root.activeReaderSubTab === 0 ? root.activeReaderTransText : root.activeReaderNotesText
                 }
               }
             }
@@ -1595,7 +1603,7 @@ BarWidget {
                   delegate: Rectangle {
                     id: cardDelegate
                     width: historyView.width - 4
-                    height: 52
+                    height: 54
                     radius: 6
                     color: cardMouse.containsMouse ? Util.alpha(Color.foreground, 0.06) : Util.alpha(Color.foreground, 0.03)
                     border.width: 1
@@ -1611,8 +1619,9 @@ BarWidget {
 
                       // Mode Icon
                       Rectangle {
-                        width: 32
-                        height: 32
+                        Layout.preferredWidth: 32
+                        Layout.preferredHeight: 32
+                        Layout.alignment: Qt.AlignVCenter
                         radius: 6
                         color: modelData.mode === "meeting" ? Util.alpha(Color.accent, 0.15) : Util.alpha(Color.foreground, 0.10)
                         Text {
@@ -1627,8 +1636,10 @@ BarWidget {
                       // Title & Metadata
                       ColumnLayout {
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
                         spacing: 1
                         Text {
+                          Layout.fillWidth: true
                           text: modelData.title || modelData.filename
                           font.family: "JetBrainsMono Nerd Font"
                           font.bold: true
@@ -1637,6 +1648,7 @@ BarWidget {
                           elide: Text.ElideRight
                         }
                         Text {
+                          Layout.fillWidth: true
                           text: modelData.date + " • " + modelData.size_kb + " KB" + (modelData.has_notes ? " • Notes Ready" : " • Audio Only")
                           font.family: "JetBrainsMono Nerd Font"
                           font.pixelSize: 10
@@ -1644,41 +1656,17 @@ BarWidget {
                         }
                       }
 
-                      // Uniform 4-Button Action Toolbar (Notes, Transcript, Transcribe, Delete)
+                      // Perfectly Aligned 4-Button Toolbar: Transcript -> Notes -> Transcribe -> Bin
                       RowLayout {
+                        Layout.preferredHeight: 32
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                         spacing: 6
 
-                        // Button 1: Notes Icon Button (32x32)
+                        // 1. Transcript Icon Button (32x32)
                         Rectangle {
-                          width: 32
-                          height: 32
-                          radius: 5
-                          color: modelData.has_notes ? (notesBtnArea.containsMouse ? Util.alpha(Color.accent, 0.28) : Util.alpha(Color.accent, 0.16)) : Util.alpha(Color.foreground, 0.04)
-                          opacity: modelData.has_notes ? 1.0 : 0.25
-                          Text {
-                            anchors.centerIn: parent
-                            text: "󰎚"
-                            font.family: "JetBrainsMono Nerd Font"
-                            font.pixelSize: 13
-                            color: modelData.has_notes ? Color.accent : Color.muted
-                          }
-                          ToolTip.visible: notesBtnArea.containsMouse
-                          ToolTip.text: modelData.has_notes ? "View Structured Notes" : "No notes generated yet"
-                          ToolTip.delay: 250
-                          MouseArea {
-                            id: notesBtnArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            enabled: modelData.has_notes
-                            cursorShape: modelData.has_notes ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: root.openReader(modelData, 0)
-                          }
-                        }
-
-                        // Button 2: Transcript Icon Button (32x32)
-                        Rectangle {
-                          width: 32
-                          height: 32
+                          Layout.preferredWidth: 32
+                          Layout.preferredHeight: 32
+                          Layout.alignment: Qt.AlignVCenter
                           radius: 5
                           color: modelData.has_transcript ? (transBtnArea.containsMouse ? Util.alpha(Color.foreground, 0.16) : Util.alpha(Color.foreground, 0.08)) : Util.alpha(Color.foreground, 0.04)
                           opacity: modelData.has_transcript ? 1.0 : 0.25
@@ -1698,14 +1686,43 @@ BarWidget {
                             hoverEnabled: true
                             enabled: modelData.has_transcript
                             cursorShape: modelData.has_transcript ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: root.openReader(modelData, 0)
+                          }
+                        }
+
+                        // 2. Structured Notes Icon Button (32x32, Page with writing lines)
+                        Rectangle {
+                          Layout.preferredWidth: 32
+                          Layout.preferredHeight: 32
+                          Layout.alignment: Qt.AlignVCenter
+                          radius: 5
+                          color: modelData.has_notes ? (notesBtnArea.containsMouse ? Util.alpha(Color.accent, 0.28) : Util.alpha(Color.accent, 0.16)) : Util.alpha(Color.foreground, 0.04)
+                          opacity: modelData.has_notes ? 1.0 : 0.25
+                          Text {
+                            anchors.centerIn: parent
+                            text: "󰈙"
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 13
+                            color: modelData.has_notes ? Color.accent : Color.muted
+                          }
+                          ToolTip.visible: notesBtnArea.containsMouse
+                          ToolTip.text: modelData.has_notes ? "View Structured Notes" : "No notes generated yet"
+                          ToolTip.delay: 250
+                          MouseArea {
+                            id: notesBtnArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: modelData.has_notes
+                            cursorShape: modelData.has_notes ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: root.openReader(modelData, 1)
                           }
                         }
 
-                        // Button 3: Transcribe / Re-Transcribe Icon Button (32x32)
+                        // 3. Transcribe / Re-Transcribe Icon Button (32x32)
                         Rectangle {
-                          width: 32
-                          height: 32
+                          Layout.preferredWidth: 32
+                          Layout.preferredHeight: 32
+                          Layout.alignment: Qt.AlignVCenter
                           radius: 5
                           color: isTranscribingThis
                             ? Util.alpha(Color.accent, 0.35)
@@ -1734,15 +1751,16 @@ BarWidget {
                           }
                         }
 
-                        // Button 4: Delete Icon Button (32x32)
+                        // 4. Delete Icon Button (32x32, Bin Icon)
                         Rectangle {
-                          width: 32
-                          height: 32
+                          Layout.preferredWidth: 32
+                          Layout.preferredHeight: 32
+                          Layout.alignment: Qt.AlignVCenter
                           radius: 5
                           color: delArea.containsMouse ? Util.alpha(Color.urgent, 0.22) : Util.alpha(Color.foreground, 0.04)
                           Text {
                             anchors.centerIn: parent
-                            text: "󰅖"
+                            text: "󰆴"
                             font.family: "JetBrainsMono Nerd Font"
                             font.pixelSize: 13
                             color: delArea.containsMouse ? Color.urgent : Color.muted

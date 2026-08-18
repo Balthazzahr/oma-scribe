@@ -469,12 +469,12 @@ BarWidget {
 
     text: {
       if (root.stateObj.is_recording) {
-        return "\ued03 " + root.formatDuration(root.elapsedSeconds)
+        return "\udb81\uded3 " + root.formatDuration(root.elapsedSeconds)
       }
       if (root.stateObj.is_processing) {
         return "󰑮 " + root.formatDuration(root.transcribeElapsedSeconds)
       }
-      return "\ued03"
+      return "\udb81\uded3"
     }
 
     onPressed: function(btn) {
@@ -524,7 +524,7 @@ BarWidget {
           Layout.fillWidth: true
           spacing: 10
 
-          // App Title with Studio Mic Icon
+          // App Title with Feather Icon
           RowLayout {
             spacing: 8
             Rectangle {
@@ -534,7 +534,7 @@ BarWidget {
               color: Util.alpha(Color.accent, 0.15)
               Text {
                 anchors.centerIn: parent
-                text: "\ued03"
+                text: "\udb81\uded3"
                 font.family: "JetBrainsMono Nerd Font"
                 font.pixelSize: 16
                 color: Color.accent
@@ -543,7 +543,7 @@ BarWidget {
             ColumnLayout {
               spacing: 0
               Text {
-                text: "OMA SCRIBE"
+                text: "omaSCRIBE"
                 font.family: "JetBrainsMono Nerd Font"
                 font.bold: true
                 font.pixelSize: Style.font.body

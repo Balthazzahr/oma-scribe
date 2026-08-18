@@ -1,4 +1,4 @@
-# Oma Scribe
+# omaSCRIBE
 
 > **Smart Meeting Recorder, Verbatim Transcriber & AI Structured Notes Synthesizer for Omarchy Linux Desktop (Quickshell).**
 
@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Arch%20Linux%20%2F%20PipeWire-orange.svg)](#requirements)
 
-**Oma Scribe** is an intelligent, privacy-first audio recording and note-taking widget for the Omarchy Linux desktop. It captures dual-channel online meetings (Microsoft Teams, Zoom, Google Meet, Signal) and voice memos directly from your local PipeWire / PulseAudio server, transcribes verbatim dialog with speaker identification, and generates structured executive markdown notes.
+**omaSCRIBE** is an intelligent, privacy-first audio recording and note-taking widget for the Omarchy Linux desktop. It captures dual-channel online meetings (Microsoft Teams, Zoom, Google Meet, Signal) and voice memos directly from your local PipeWire / PulseAudio server, transcribes verbatim dialog with speaker identification, and generates structured executive markdown notes.
 
 ---
 

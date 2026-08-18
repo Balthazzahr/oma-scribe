@@ -191,10 +191,19 @@ BarWidget {
     copyFeedbackTimer.restart()
   }
 
+  function openInGemini(item) {
+    if (!item) return
+    var targetFile = item.transcript_file || (item.folder + "/transcript.md")
+    geminiProc.command = ["python3", enginePath, "open-gemini", targetFile, item.title || "", ""]
+    geminiProc.running = true
+    root.copyFeedbackText = "✓ Prompt copied! Opening Gemini Web..."
+    copyFeedbackTimer.restart()
+  }
+
   function openReader(item, subTab) {
     if (!item) return
     root.currentReaderItem = item
-    root.activeReaderSubTab = (subTab !== undefined) ? subTab : (item.has_transcript ? 0 : (item.has_notes ? 1 : 0))
+    root.activeReaderSubTab = (subTab !== undefined) ? subTab : 0
     root.activeReaderNotesText = "Loading notes..."
     root.activeReaderTransText = "Loading transcript..."
     root.isReaderOpen = true
@@ -204,14 +213,14 @@ BarWidget {
       readNotesProc.command = ["python3", enginePath, "read-file", item.notes_file]
       readNotesProc.running = true
     } else {
-      root.activeReaderNotesText = "No structured notes generated yet.\n\nClick 'Transcribe' to process this recording with Groq Whisper & Llama."
+      root.activeReaderNotesText = "No structured notes generated yet.\n\nUse 'Gemini Web' to generate complete notes in your browser."
     }
 
     if (item.transcript_file) {
       readTransProc.command = ["python3", enginePath, "read-file", item.transcript_file]
       readTransProc.running = true
     } else {
-      root.activeReaderTransText = "No verbatim transcript generated yet.\n\nClick 'Transcribe' to process this recording with Groq Whisper & Llama."
+      root.activeReaderTransText = "No verbatim transcript generated yet.\n\nClick 'Transcribe' to process this recording with Groq Whisper."
     }
   }
 
@@ -375,6 +384,7 @@ BarWidget {
   Process { id: execProc }
   Process { id: editorProc }
   Process { id: copyProc }
+  Process { id: geminiProc }
 
   Process {
     id: pickDirProc
@@ -1391,7 +1401,7 @@ BarWidget {
                   Text { text: "Re-transcribe"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.foreground }
                 }
                 ToolTip.visible: retransHover.containsMouse
-                ToolTip.text: "Re-run Whisper transcription & AI note synthesis"
+                ToolTip.text: "Re-run Whisper transcription & speaker attribution"
                 ToolTip.delay: 300
                 MouseArea {
                   id: retransHover
@@ -1411,17 +1421,17 @@ BarWidget {
                 width: 86
                 height: 34
                 radius: 6
-                color: Util.alpha(Color.accent, 0.18)
+                color: Util.alpha(Color.foreground, 0.08)
                 border.width: 1
-                border.color: Color.accent
+                border.color: Util.alpha(Color.foreground, 0.15)
                 RowLayout {
                   anchors.centerIn: parent
                   spacing: 5
-                  Text { text: "󰆏"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: Color.accent }
-                  Text { text: "Copy"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
+                  Text { text: "󰆏"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: Color.foreground }
+                  Text { text: "Copy"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.foreground }
                 }
                 ToolTip.visible: copyHover.containsMouse
-                ToolTip.text: root.activeReaderSubTab === 0 ? "Copy verbatim transcript to clipboard" : "Copy structured notes to clipboard"
+                ToolTip.text: "Copy transcript to clipboard"
                 ToolTip.delay: 300
                 MouseArea {
                   id: copyHover
@@ -1431,6 +1441,36 @@ BarWidget {
                   onClicked: {
                     var txt = root.activeReaderSubTab === 0 ? root.activeReaderTransText : root.activeReaderNotesText
                     root.copyText(txt, root.activeReaderSubTab === 0 ? "Transcript copied" : "Notes copied")
+                  }
+                }
+              }
+
+              // Gemini Web Button (1-Click Copy Prompt & Launch Gemini Web)
+              Rectangle {
+                width: 130
+                height: 34
+                radius: 6
+                color: geminiHover.containsMouse ? Util.alpha(Color.accent, 0.32) : Util.alpha(Color.accent, 0.18)
+                border.width: 1
+                border.color: Color.accent
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 5
+                  Text { text: "󰚩"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.accent }
+                  Text { text: "Gemini Web"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
+                }
+                ToolTip.visible: geminiHover.containsMouse
+                ToolTip.text: "Copy meeting prompt to clipboard & launch Google Gemini Web in your browser"
+                ToolTip.delay: 300
+                MouseArea {
+                  id: geminiHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (root.currentReaderItem) {
+                      root.openInGemini(root.currentReaderItem)
+                    }
                   }
                 }
               }

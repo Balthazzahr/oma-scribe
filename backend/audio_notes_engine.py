@@ -661,7 +661,7 @@ def strip_think_tags(text):
     return cleaned.strip()
 
 def call_groq_chat(messages, api_key, model_list=None, max_tokens=1200):
-    """Calls Groq chat completion with automatic model fallback across active LLMs."""
+    """Calls Groq chat completion with automatic model fallback and rate-limit backoff across active LLMs."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     clean_key = (api_key or "").strip()
 
@@ -691,24 +691,27 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=1200):
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             }
         )
-        try:
-            with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
-                res_data = json.loads(resp.read().decode("utf-8"))
-                choices = res_data.get("choices", [])
-                if choices and choices[0].get("message"):
-                    raw_content = choices[0]["message"].get("content", "").strip()
-                    cleaned_content = strip_think_tags(raw_content)
-                    return cleaned_content, m
-        except urllib.error.HTTPError as e:
-            err_msg = extract_http_error(e)
-            last_errors.append(f"{m} -> {err_msg}")
-            # If rate limited (429) or payload too large for model TPM (413), backoff briefly
-            if e.code in (429, 413, 503):
-                time.sleep(2.0)
-            continue
-        except Exception as e:
-            last_errors.append(f"{m} -> {str(e)}")
-            continue
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+                    res_data = json.loads(resp.read().decode("utf-8"))
+                    choices = res_data.get("choices", [])
+                    if choices and choices[0].get("message"):
+                        raw_content = choices[0]["message"].get("content", "").strip()
+                        cleaned_content = strip_think_tags(raw_content)
+                        return cleaned_content, m
+            except urllib.error.HTTPError as e:
+                err_msg = extract_http_error(e)
+                last_errors.append(f"{m} (att {attempt+1}) -> {err_msg}")
+                # If rate limited (429) or busy (503), back off and retry
+                if e.code in (429, 413, 503):
+                    time.sleep(3.0 * (attempt + 1))
+                    continue
+                break
+            except Exception as e:
+                last_errors.append(f"{m} -> {str(e)}")
+                time.sleep(1.0)
+                continue
 
     err_summary = " | ".join(last_errors) if last_errors else "All models failed"
     raise RuntimeError(f"Groq note synthesis failed: {err_summary}")
@@ -731,14 +734,27 @@ def sanitize_whisper_prompt(raw_text):
 
 def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
     """
-    Takes timestamped Whisper output ([MM:SS] Text) and maps speaker names ([MM:SS] Name: Text)
-    using conversational context and attendee list.
+    Takes timestamped Whisper output ([MM:SS] Text) and formats strictly as:
+    [TIME] - SPEAKER - Spoken text
+    If speaker cannot be identified, uses 'Unknown Male Speaker', 'Unknown Female Speaker', or 'Unknown Speaker'.
     """
     if not raw_transcript or not raw_transcript.strip():
         return raw_transcript
 
     if not attendees_meta:
-        return raw_transcript
+        # If no attendees provided, format timestamp as [TIME] - Unknown Speaker - text
+        formatted_lines = []
+        for line in raw_transcript.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.*)", line)
+            if m:
+                ts, content = m.group(1), m.group(2)
+                formatted_lines.append(f"{ts} - Unknown Speaker - {content}")
+            else:
+                formatted_lines.append(line)
+        return "\n".join(formatted_lines)
 
     # Format attendee guidance for LLM
     if isinstance(attendees_meta, list):
@@ -766,14 +782,15 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
     attributed_lines = []
 
     sys_prompt = (
-        "You are an expert audio transcriptionist and speaker diarization specialist. "
+        "You are an expert audio transcriptionist and speaker attribution specialist. "
         "Your task is to take a timestamped transcript and attribute each dialogue turn to the correct speaker "
         "based on the provided attendee list, their genders/roles, conversational tone, and speech flow.\n\n"
-        "RULES:\n"
-        "1. Output ONLY lines formatted as: [HH:MM:SS] Speaker Name: Spoken text (or [MM:SS] Speaker Name: Spoken text).\n"
-        "2. Do NOT summarize or alter spoken words. Preserve verbatim speech.\n"
-        "3. If speaker is uncertain, use the most plausible attendee name.\n"
-        "4. Do NOT add any preamble, thinking process, conversational greeting, or markdown headers."
+        "CRITICAL FORMAT RULES:\n"
+        "1. Every single line MUST strictly follow the exact format: [TIME] - SPEAKER - Spoken text\n"
+        "   Example: [00:21] - Toni Criminello - It's disruptive. It's very disruptive for the team.\n"
+        "2. If a speaker cannot be identified from the attendee list, use 'Unknown Male Speaker' or 'Unknown Female Speaker' or 'Unknown Speaker'.\n"
+        "3. Preserve all verbatim spoken words and exact timestamps from the input. Do NOT summarize, rephrase, or omit words.\n"
+        "4. Do NOT output any thinking process, preamble, explanation, or markdown headers. Output ONLY the formatted dialogue lines."
     )
 
     models_to_try = get_available_groq_models(api_key)
@@ -786,7 +803,7 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
 
     for idx, batch in enumerate(batches):
         batch_text = "\n".join(batch)
-        user_prompt = f"Meeting Attendees:\n{att_str}\n\nTimestamped Transcript to Attribute:\n{batch_text}"
+        user_prompt = f"Meeting Attendees:\n{att_str}\n\nTimestamped Transcript to Format:\n{batch_text}"
         try:
             res, _ = call_groq_chat(
                 [
@@ -805,225 +822,110 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
                 if re.match(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]", l.strip())
             ]
             if parsed_lines:
-                attributed_lines.extend(parsed_lines)
+                for pl in parsed_lines:
+                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*-\s*(.+?)\s*-\s*(.+)$", pl)
+                    if m:
+                        attributed_lines.append(f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}")
+                        continue
+                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*:\s*(.+)$", pl)
+                    if m:
+                        attributed_lines.append(f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}")
+                        continue
+                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*-\s*(.+)$", pl)
+                    if m:
+                        attributed_lines.append(f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}")
+                        continue
+                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", pl)
+                    if m:
+                        attributed_lines.append(f"{m.group(1)} - Unknown Speaker - {m.group(2).strip()}")
+                    else:
+                        attributed_lines.append(pl)
             else:
-                attributed_lines.append(batch_text)
+                for bl in batch:
+                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", bl)
+                    if m:
+                        attributed_lines.append(f"{m.group(1)} - Unknown Speaker - {m.group(2).strip()}")
+                    else:
+                        attributed_lines.append(bl)
         except Exception:
-            attributed_lines.append(batch_text)
+            for bl in batch:
+                m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", bl)
+                if m:
+                    attributed_lines.append(f"{m.group(1)} - Unknown Speaker - {m.group(2).strip()}")
+                else:
+                    attributed_lines.append(bl)
 
         if idx < len(batches) - 1:
-            time.sleep(0.5)
+            time.sleep(1.0)
 
     return "\n".join(attributed_lines).strip()
 
-def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_key="", model="llama-3.1-70b-versatile", metadata=None):
+def prepare_gemini_prompt_and_open(transcript_path, title="", attendees=""):
     """
-    Submits verbatim transcript to Groq LLM for structured synthesis (~1s).
-    Automatically chunks large transcripts (>6,000 chars) to stay safely under TPM rate limits.
+    Formats the complete transcript into a professional prompt for Google Gemini Web,
+    copies it directly to the system clipboard (wl-copy / xclip), and opens Gemini in browser.
     """
-    clean_key = (api_key or "").strip()
-    meta = metadata or {}
-    attendees = meta.get("attendees", [])
-    if isinstance(attendees, str):
-        if "AttendeeONE" in attendees or "AttendeeTWO" in attendees:
-            attendees = []
-        else:
-            attendees = [s.strip() for s in attendees.split(",") if s.strip()]
-    topics = (meta.get("topics") or "").strip()
-    notes = (meta.get("notes") or "").strip()
-    description_parts = []
-    if topics:
-        description_parts.append(topics)
-    if notes:
-        description_parts.append(notes)
-    meeting_description = "\n\n".join(description_parts) if description_parts else "(No description provided)"
+    transcript_content = ""
+    p = Path(transcript_path) if transcript_path else None
+    if p and p.exists():
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                transcript_content = f.read().strip()
+        except Exception:
+            pass
 
-    attendee_lines = ""
-    if attendees:
-        att_list = []
-        for a in attendees:
-            if isinstance(a, dict) and a.get("name"):
-                sex = (a.get("sex") or "").strip()
-                att_list.append(f"- {a['name']}" + (f" ({sex})" if sex else ""))
-            elif isinstance(a, str) and a.strip():
-                att_list.append(f"- {a.strip()}")
-        attendee_lines = "\n".join(att_list)
+    if not transcript_content:
+        return {"status": "error", "message": "Transcript file not found"}
 
-    # Rank available models by capacity and TPM limits
-    active_models = get_available_groq_models(clean_key)
-    models_to_try = []
-    if model and (not active_models or model in active_models):
-        models_to_try.append(model)
+    meta_title = title or p.parent.name.split(" - ")[0] if p else "Meeting"
 
-    if active_models:
-        def model_score(name):
-            n = name.lower()
-            # 1. Highest TPM allowance (30k TPM)
-            if "llama-4-scout" in n or "llama-4" in n: return 120
-            # 2. Flagship note synthesis (12k TPM)
-            if "llama-3.3-70b" in n or "70b" in n: return 100
-            if "llama-3.1-8b" in n or "8b" in n: return 85
-            if "gpt-oss-120b" in n: return 75
-            if "gpt-oss-20b" in n: return 70
-            if "qwen" in n: return 65
-            if "deepseek" in n: return 60
-            if "gemma" in n: return 50
-            return 10
-        sorted_active = sorted(active_models, key=model_score, reverse=True)
-        for m in sorted_active:
-            if m not in models_to_try:
-                models_to_try.append(m)
+    prompt = f"""Please analyze this meeting transcript and generate comprehensive, structured executive meeting notes.
 
-    # If transcript is large (>6,000 chars), summarize sections first to stay well under TPM limits
-    processed_transcript = transcript_text
-    if len(transcript_text) > 6000:
-        update_progress("Synthesizing multi-part meeting transcript in sections...", 65)
-        lines = transcript_text.split("\n")
-        chunks = []
-        cur_chunk = []
-        cur_len = 0
-        for l in lines:
-            cur_chunk.append(l)
-            cur_len += len(l) + 1
-            if cur_len >= 5000:
-                chunks.append("\n".join(cur_chunk))
-                cur_chunk = []
-                cur_len = 0
-        if cur_chunk:
-            chunks.append("\n".join(cur_chunk))
+Meeting Title: {meta_title}
+Attendees: {attendees or "Listed in transcript"}
 
-        section_summaries = []
-        for idx, ch in enumerate(chunks):
-            update_progress(f"Synthesizing section {idx+1}/{len(chunks)}...", 65 + int(idx * 15 / len(chunks)))
-            sec_prompt = (
-                "Summarize factual key discussion points, context, explicitly agreed decisions, and stated action items from this transcript section.\n"
-                "STRICT RULES: Do NOT invent deadlines or assume unstated facts.\n\n"
-                f"{ch}"
-            )
-            sec_res, _ = call_groq_chat(
-                [{"role": "user", "content": sec_prompt}],
-                api_key=clean_key,
-                model_list=models_to_try,
-                max_tokens=600
-            )
-            section_summaries.append(f"### Meeting Segment {idx+1}\n{sec_res}")
-            if idx < len(chunks) - 1:
-                time.sleep(1.5)  # Brief delay to prevent burst token usage
+=====================
+VERBATIM TRANSCRIPT:
+=====================
+{transcript_content}
 
-        combined = "\n\n".join(section_summaries)
-        if len(combined) > 4000:
-            combined = combined[:4000] + "\n...(Summaries condensed)..."
-        processed_transcript = "## Sectional Syntheses from Verbatim Transcript:\n" + combined
+=====================
+REQUESTED OUTPUT FORMAT:
+=====================
+1. Executive Summary & Overview
+2. Key Discussion Points & Insights
+3. Explicit Agreements & Decisions Log
+4. Action Items Table (Action Item | Owner | Target Date | Context)
+5. Next Steps & Follow-ups"""
 
-    update_progress("Generating final executive meeting record...", 85)
+    # 1. Copy formatted prompt to clipboard
+    try:
+        proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
+        proc.communicate(input=prompt.encode("utf-8"))
+    except Exception:
+        try:
+            proc = subprocess.Popen(["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE)
+            proc.communicate(input=prompt.encode("utf-8"))
+        except Exception:
+            pass
 
-    if mode == "meeting":
-        system_prompt = (
-            "You are a rigorous, executive meeting analyst. Your job is to transform meeting transcripts into factual, highly structured, professional meeting records.\n\n"
-            "CRITICAL FACTUAL ACCURACY RULES:\n"
-            "1. STRICT FACTUAL FIDELITY: Base all notes, findings, summaries, and points STRICTLY on statements explicitly made in the transcript. Do NOT invent, assume, or extrapolate facts.\n"
-            "2. NO FABRICATED TIMELINES: Do NOT invent arbitrary deadlines (e.g. '5 business days', '10 business days') unless explicitly spoken by a participant. If no timeline was agreed upon, write 'Not specified'.\n"
-            "3. NO INVENTED PROCEDURES OR ACTION ITEMS: Only document action items and decisions that were explicitly agreed or assigned. If no formal action items or decisions were made, explicitly state 'No formal action items assigned' or 'No formal decisions reached in this session'.\n"
-            "4. SPEAKER ACCURACY: Attribute statements and viewpoints accurately to the correct participants as identified in the transcript."
+    # 2. Open Gemini Web in default browser
+    try:
+        subprocess.Popen(
+            ["xdg-open", "https://gemini.google.com/app"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
-        user_prompt = f"""Generate a detailed meeting record based on this meeting context and transcript:
+    except Exception:
+        pass
 
-=====================
-MEETING CONTEXT
-=====================
-Meeting Title: {title or "Team Meeting"}
-Description / Agenda: {meeting_description}
-Expected Attendees:
-{attendee_lines or "(No attendees specified)"}
-
-=====================
-TRANSCRIPT DATA
-=====================
-{processed_transcript}
-
-=====================
-REQUIRED FORMAT
-=====================
-Output structured markdown precisely as follows:
-
-## Meeting Overview
-- **Meeting**: {title or "Team Meeting"}
-- **Attendees Detected**: [List identified participants]
-- **Summary**: [2-3 sentence executive overview of main goals and outcomes]
-
-## Agenda / Key Topics Discussed
-[Numbered list of distinct subjects covered]
-
-## Detailed Discussion
-### [Topic 1]
-- **Context**: Summary of why this was discussed
-- **Key Points**: Comprehensive details, context, and findings
-- **Questions & Answers**: Any notable questions asked and answered
-- **Agreements / Outcomes**: Explicit agreements made
-
-## Action Items
-| Action Item | Owner | Target Deadline | Context / Details |
-| :--- | :--- | :--- | :--- |
-
-## Key Decisions Log
-- **[Decision]** — agreed by [participants]
-
-## Next Steps & Follow-ups"""
-    else:
-        system_prompt = (
-            "You are an expert audio note synthesizer. Your job is to transform voice memos and spoken thoughts into structured, crystal-clear notes and action items.\n\n"
-            "CRITICAL FACTUAL ACCURACY RULES:\n"
-            "1. STRICT FACTUAL FIDELITY: Base all notes strictly on what was actually said. Do NOT invent facts or deadlines.\n"
-            "2. CLEAR ACTION ITEMS: Only list action items that were explicitly mentioned by the speaker."
-        )
-        user_prompt = f"""Generate a structured note based on this audio transcript:
-
-=====================
-MEMO CONTEXT
-=====================
-Memo Title: {title or "Voice Memo"}
-Context: {meeting_description}
-
-=====================
-TRANSCRIPT DATA
-=====================
-{processed_transcript}
-
-=====================
-REQUIRED FORMAT
-=====================
-## Summary & Overview
-[Executive summary of the dictation]
-
-## Key Takeaways & Ideas
-- [Detailed bullet point breakdown of insights, thoughts, and points raised]
-
-## Action Items & Next Steps
-- [ ] [Action item with any details mentioned]
-
-## Technical Specifics / References
-- [Any specific names, numbers, URLs, commands, or details]
-
-## Open Questions / Follow-ups"""
-
-    result_text, model_used = call_groq_chat(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        api_key=clean_key,
-        model_list=models_to_try,
-        max_tokens=1500
-    )
-    return result_text, model_used
+    return {"status": "ok", "message": "Prompt copied to clipboard and Gemini opened"}
 
 def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
     state = get_state()
     settings = load_settings()
 
     api_key = settings.get("groq_api_key", "").strip() or os.environ.get("GROQ_API_KEY", "").strip()
-    groq_model = settings.get("groq_model", "llama-3.1-70b-versatile")
-    whisper_model = settings.get("whisper_model", "whisper-large-v3")
 
     if not api_key:
         err_msg = "Groq API key is not configured. Please open Oma Scribe Settings."
@@ -1077,7 +979,7 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
         save_note_metadata(note_dir, meta)
 
     audio_duration = get_audio_duration(audio_path)
-    estimated_duration = max(5, int(audio_duration / 120) + 4)
+    estimated_duration = max(4, int(audio_duration / 120) + 3)
 
     state.update({
         "is_processing": True,
@@ -1087,7 +989,7 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
         "current_audio_file": str(audio_path),
         "current_folder": str(note_dir),
         "current_model": "Whisper Large v3",
-        "progress_percent": 10,
+        "progress_percent": 15,
         "processing_stage": "Uploading to Groq LPU (Whisper Large v3)...",
         "status_message": "Transcribing with Groq...",
         "last_error": ""
@@ -1096,25 +998,16 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
     notify("Processing Audio", f"Transcribing {note_dir.name} on Groq LPUs...")
 
     try:
-        # 1. Transcribe with Whisper Large v3
-        attendees = meta.get("attendees", [])
-        if isinstance(attendees, str):
-            if "AttendeeONE" in attendees or "AttendeeTWO" in attendees:
-                prompt_raw = ""
-            else:
-                prompt_raw = attendees
-        elif isinstance(attendees, list):
-            prompt_raw = ", ".join(a.get("name", "") if isinstance(a, dict) else str(a) for a in attendees if "AttendeeONE" not in str(a))
-        # Whisper prompt is left clean/empty to prevent Whisper autoregressive looping in pauses
-        update_progress("Transcribing audio on Groq LPUs (Whisper Large v3)...", 35, current_model="Whisper Large v3")
-
+        # 1. Transcribe audio with Whisper Large v3 (clean prompt="" to prevent decoder looping)
+        update_progress("Transcribing audio on Groq LPUs (Whisper Large v3)...", 40, current_model="Whisper Large v3")
         raw_transcript = transcribe_audio_with_groq(str(audio_path), api_key=api_key, prompt="")
 
-        # 2. Attribute Speakers & Format Verbatim Transcript
-        update_progress("Attributing speakers and formatting transcript...", 55, current_model="Groq LLM")
+        # 2. Attribute Speakers & Format as: [TIME] - SPEAKER - Spoken text
+        update_progress("Attributing speakers and formatting transcript...", 75, current_model="Groq LLM")
+        attendees = meta.get("attendees", [])
         transcript_text = attribute_speakers_in_transcript(raw_transcript, attendees, api_key=api_key)
 
-        # 3. SAVE TRANSCRIPT IMMEDIATELY so verbatim output is guaranteed preserved!
+        # 3. SAVE TRANSCRIPT IMMEDIATELY
         notes_fmt = settings.get("notes_format", "md").lower()
         formatted_trans = format_notes_content(transcript_text, notes_fmt)
         transcript_file = note_dir / f"transcript.{notes_fmt}"
@@ -1122,27 +1015,6 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
             f.write(formatted_trans)
 
         meta["has_transcript"] = True
-        save_note_metadata(note_dir, meta)
-
-        # 4. Synthesize structured notes
-        update_progress(f"Synthesizing meeting notes...", 75, current_model="Groq LLM")
-        notes_md, model_used = synthesize_notes_with_groq(
-            transcript_text=transcript_text,
-            mode=mode,
-            title=title,
-            api_key=api_key,
-            model=groq_model,
-            metadata=meta
-        )
-
-        # 5. Format & Save Notes
-        update_progress("Writing notes.md...", 95, current_model=model_used)
-        formatted_notes = format_notes_content(notes_md, notes_fmt)
-        notes_file = note_dir / f"notes.{notes_fmt}"
-        with open(notes_file, "w", encoding="utf-8") as f:
-            f.write(formatted_notes)
-
-        meta["has_notes"] = True
         meta["title"] = title
         meta["notes_format"] = notes_fmt
         save_note_metadata(note_dir, meta)
@@ -1153,13 +1025,13 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
             "progress_percent": 100,
             "processing_stage": "Complete",
             "last_processed_file": str(audio_path),
-            "last_notes_file": str(notes_file),
+            "last_notes_file": "",
             "last_transcript_file": str(transcript_file),
-            "status_message": f"Notes ready ({model_used})",
+            "status_message": "Transcript Ready",
             "last_error": ""
         })
         save_state(state)
-        notify("Processing Complete", f"Saved Notes & Transcript in {note_dir.name} (Groq)")
+        notify("Transcription Complete", f"Transcript ready for {note_dir.name}")
 
     except Exception as e:
         err_str = str(e)
@@ -1354,6 +1226,12 @@ def main():
                 print(f.read())
         else:
             print("")
+
+    elif cmd == "open-gemini":
+        target = sys.argv[2] if len(sys.argv) > 2 else ""
+        title = sys.argv[3] if len(sys.argv) > 3 else ""
+        attendees = sys.argv[4] if len(sys.argv) > 4 else ""
+        print(json.dumps(prepare_gemini_prompt_and_open(target, title, attendees)))
 
     else:
         print(json.dumps({"error": f"Unknown command: {cmd}"}))

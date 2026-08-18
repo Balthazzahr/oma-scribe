@@ -694,6 +694,8 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
     Submits verbatim transcript to Groq LLM for structured synthesis (~1s).
     Automatically chunks large transcripts (>20,000 chars) to prevent TPM rate limits.
     """
+    clean_key = (api_key or "").strip()
+    meta = metadata or {}
     attendees = meta.get("attendees", [])
     if isinstance(attendees, str):
         if "AttendeeONE" in attendees or "AttendeeTWO" in attendees:

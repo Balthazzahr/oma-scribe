@@ -71,7 +71,7 @@ BarWidget {
     meetingAttendeesText = ""
   }
 
-  implicitWidth: button.implicitWidth
+  implicitWidth: Math.max(button.implicitWidth, (root.stateObj.is_recording || root.stateObj.is_processing) ? 82 : 36)
   implicitHeight: button.implicitHeight
 
   // --- ENGINE PROCESSES ---
@@ -459,22 +459,48 @@ BarWidget {
     root.updateStatus()
   }
 
-  // --- BAR WIDGET BUTTON (ICON ONLY ON BAR) ---
+  // --- BAR WIDGET BUTTON (FEATHER ICON & JIGGLE ANIMATION) ---
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     horizontalMargin: 6
     verticalPadding: 4
+    text: ""
 
-    text: {
-      if (root.stateObj.is_recording) {
-        return "\udb81\uded3 " + root.formatDuration(root.elapsedSeconds)
+    RowLayout {
+      anchors.centerIn: parent
+      spacing: 6
+
+      Text {
+        id: barQuillIcon
+        text: "\udb81\uded3"
+        font.family: "JetBrainsMono Nerd Font"
+        font.pixelSize: Style.font.body
+        color: root.stateObj.is_recording ? Color.urgent : (root.stateObj.is_processing ? Color.accent : Color.foreground)
+        transformOrigin: Item.Center
+
+        SequentialAnimation on rotation {
+          running: root.stateObj.is_processing
+          loops: Animation.Infinite
+          NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
+          NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
+          NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+        }
       }
-      if (root.stateObj.is_processing) {
-        return "󰑮 " + root.formatDuration(root.transcribeElapsedSeconds)
+
+      Text {
+        visible: root.stateObj.is_recording || root.stateObj.is_processing
+        text: {
+          if (root.stateObj.is_recording) return root.formatDuration(root.elapsedSeconds)
+          if (root.stateObj.is_processing) return root.formatDuration(root.transcribeElapsedSeconds)
+          return ""
+        }
+        font.family: "JetBrainsMono Nerd Font"
+        font.bold: true
+        font.pixelSize: Style.font.body
+        color: root.stateObj.is_recording ? Color.urgent : (root.stateObj.is_processing ? Color.accent : Color.foreground)
       }
-      return "\udb81\uded3"
     }
 
     onPressed: function(btn) {
@@ -770,10 +796,19 @@ BarWidget {
               spacing: 8
 
               Text {
-                text: "󱐋"
+                text: "\udb81\uded3"
                 font.family: "JetBrainsMono Nerd Font"
-                font.pixelSize: 14
+                font.pixelSize: 18
                 color: Color.accent
+                transformOrigin: Item.Center
+
+                SequentialAnimation on rotation {
+                  running: root.stateObj.is_processing
+                  loops: Animation.Infinite
+                  NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
+                  NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
+                  NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+                }
               }
 
               ColumnLayout {
@@ -1360,7 +1395,7 @@ BarWidget {
                 RowLayout {
                   anchors.centerIn: parent
                   spacing: 5
-                  Text { text: "󱐋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: Color.foreground }
+                  Text { text: "\udb81\uded3"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.foreground }
                   Text { text: "Re-transcribe"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.foreground }
                 }
                 ToolTip.visible: retransHover.containsMouse
@@ -1718,7 +1753,7 @@ BarWidget {
                           }
                         }
 
-                        // 3. Transcribe / Re-Transcribe Icon Button (32x32)
+                        // 3. Transcribe / Re-Transcribe Icon Button (32x32, Feather Quill with Jiggle)
                         Rectangle {
                           Layout.preferredWidth: 32
                           Layout.preferredHeight: 32
@@ -1731,12 +1766,21 @@ BarWidget {
                               : (runTransArea.containsMouse ? Util.alpha(Color.foreground, 0.16) : Util.alpha(Color.foreground, 0.08)))
                           Text {
                             anchors.centerIn: parent
-                            text: isTranscribingThis ? "󰑮" : "󱐋"
+                            text: "\udb81\uded3"
                             font.family: "JetBrainsMono Nerd Font"
                             font.pixelSize: 13
                             color: isTranscribingThis
                               ? Color.accent
                               : (!modelData.has_notes ? Color.pick("background", "#1e1e2e") : Color.foreground)
+                            transformOrigin: Item.Center
+
+                            SequentialAnimation on rotation {
+                              running: isTranscribingThis
+                              loops: Animation.Infinite
+                              NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
+                              NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
+                              NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+                            }
                           }
                           ToolTip.visible: runTransArea.containsMouse
                           ToolTip.text: isTranscribingThis ? "Transcribing in progress..." : (modelData.has_notes ? "Re-transcribe audio with Groq AI" : "Transcribe audio with Groq AI")

@@ -474,12 +474,18 @@ BarWidget {
       return "\udb81\uded3"
     }
 
-    SequentialAnimation on textRotation {
+    SequentialAnimation {
+      id: barWiggleAnim
       running: root.stateObj.is_processing
       loops: Animation.Infinite
-      NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
-      NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
-      NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+      NumberAnimation { target: button; property: "textRotation"; from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
+      NumberAnimation { target: button; property: "textRotation"; from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
+      NumberAnimation { target: button; property: "textRotation"; from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+      onRunningChanged: {
+        if (!running) {
+          button.textRotation = 0
+        }
+      }
     }
 
     onPressed: function(btn) {
@@ -775,18 +781,25 @@ BarWidget {
               spacing: 8
 
               Text {
+                id: heroQuillText
                 text: "\udb81\uded3"
                 font.family: "JetBrainsMono Nerd Font"
                 font.pixelSize: 18
                 color: Color.accent
                 transformOrigin: Item.Center
 
-                SequentialAnimation on rotation {
+                SequentialAnimation {
+                  id: heroWiggleAnim
                   running: root.stateObj.is_processing
                   loops: Animation.Infinite
-                  NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
-                  NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
-                  NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+                  NumberAnimation { target: heroQuillText; property: "rotation"; from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
+                  NumberAnimation { target: heroQuillText; property: "rotation"; from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
+                  NumberAnimation { target: heroQuillText; property: "rotation"; from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+                  onRunningChanged: {
+                    if (!running) {
+                      heroQuillText.rotation = 0
+                    }
+                  }
                 }
               }
 
@@ -1744,6 +1757,7 @@ BarWidget {
                               ? (runTransArea.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.85))
                               : (runTransArea.containsMouse ? Util.alpha(Color.foreground, 0.16) : Util.alpha(Color.foreground, 0.08)))
                           Text {
+                            id: cardQuillText
                             anchors.centerIn: parent
                             text: "\udb81\uded3"
                             font.family: "JetBrainsMono Nerd Font"
@@ -1753,12 +1767,18 @@ BarWidget {
                               : (!modelData.has_notes ? Color.pick("background", "#1e1e2e") : Color.foreground)
                             transformOrigin: Item.Center
 
-                            SequentialAnimation on rotation {
+                            SequentialAnimation {
+                              id: cardWiggleAnim
                               running: isTranscribingThis
                               loops: Animation.Infinite
-                              NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
-                              NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
-                              NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+                              NumberAnimation { target: cardQuillText; property: "rotation"; from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
+                              NumberAnimation { target: cardQuillText; property: "rotation"; from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
+                              NumberAnimation { target: cardQuillText; property: "rotation"; from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
+                              onRunningChanged: {
+                                if (!running) {
+                                  cardQuillText.rotation = 0
+                                }
+                              }
                             }
                           }
                           ToolTip.visible: runTransArea.containsMouse

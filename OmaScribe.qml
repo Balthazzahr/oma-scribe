@@ -19,58 +19,35 @@ BarWidget {
     current_audio_file: "",
     last_processed_file: "",
     last_notes_file: "",
-    status_message: "Ready"
+    status_message: "Ready",
+    processing_stage: "",
+    progress_percent: 0,
+    last_error: "",
+    current_model: ""
   })
 
   property var settingsObj: ({
-    provider: "gemini",
-    gemini_api_key: "",
     groq_api_key: "",
-    openai_api_key: "",
-    model: "gemini-3.7-flash",
-    groq_model: "llama-3.3-70b-versatile",
-    openai_model: "gpt-4o-mini",
-    local_model: "base",
+    groq_model: "llama-3.1-70b-versatile",
+    whisper_model: "whisper-large-v3",
     storage_path: "",
+    notes_format: "md",
+    audio_format: "opus",
     auto_transcribe_on_stop: true,
     default_mode: "meeting"
   })
 
-  property string selectedProvider: "gemini"
-  property string selectedModel: "gemini-3.7-flash"
-  property string selectedGroqModel: "llama-3.3-70b-versatile"
-  property string selectedOpenAIModel: "gpt-4o-mini"
-  property string selectedLocalModel: "base"
-
-  property var localWhisperStatus: ({
-    installed: false,
-    engine: null,
-    cached_models: [],
-    install_command: "sudo pacman -S python-openai-whisper"
-  })
-
-  function checkWhisper() {
-    checkWhisperProc.command = ["python3", enginePath, "check-local-whisper"]
-    checkWhisperProc.running = true
-  }
-
-  function pickDirectory() {
-    pickDirProc.command = ["python3", enginePath, "pick-directory"]
-    pickDirProc.running = true
-  }
-
-  function copyText(val) {
-    copyProc.command = ["wl-copy", val]
-    copyProc.running = true
-  }
-
+  property string selectedGroqModel: "llama-3.1-70b-versatile"
   property var historyList: []
-  property int activeTabIndex: 0 // 0: record, 1: notes, 2: settings
+  property int activeTabIndex: 0 // 0: Record, 1: Library, 2: Settings
   property string historyFilter: "all" // "all" | "meetings" | "memos"
-  property string selectedMode: "meeting"
+  property string historySearchQuery: ""
+  property string selectedMode: "meeting" // "meeting" | "mic"
   property int elapsedSeconds: 0
+  property int transcribeElapsedSeconds: 0
   property bool showApiKey: false
   property string saveFeedbackText: ""
+  property string copyFeedbackText: ""
   property string selectedNotesFormat: "md"
   property string selectedAudioFormat: "opus"
 
@@ -78,23 +55,20 @@ BarWidget {
   property string meetingTitleText: ""
   property string meetingTopicsText: ""
   property string meetingNotesText: ""
+  property string meetingAttendeesText: ""
 
-  // Voice memo fields
-  property string memoTitleText: ""
-  property string memoTopicsText: ""
-  property string memoNotesText: ""
+  // In-App Reader State
+  property bool isReaderOpen: false
+  property var currentReaderItem: null
+  property string activeReaderNotesText: ""
+  property string activeReaderTransText: ""
+  property int activeReaderSubTab: 0 // 0: Notes, 1: Transcript
 
-  // Post-recording in-place review state
-  property bool isReviewingPostRecord: false
-  property string reviewAudioPath: ""
-  property string reviewMode: "meeting"
-
-  // Dynamic Attendees List (Default: 3 attendees)
-  ListModel {
-    id: attendeesModel
-    ListElement { name: ""; sex: "" }
-    ListElement { name: ""; sex: "" }
-    ListElement { name: ""; sex: "" }
+  function resetMeetingForm() {
+    meetingTitleText = ""
+    meetingTopicsText = ""
+    meetingNotesText = ""
+    meetingAttendeesText = ""
   }
 
   implicitWidth: button.implicitWidth
@@ -118,97 +92,72 @@ BarWidget {
     historyProc.running = true
   }
 
-  function getFormMetadata() {
-    var mode = root.selectedMode
-    if (mode === "meeting") {
-      var attendees = []
-      for (var i = 0; i < attendeesModel.count; ++i) {
-        var item = attendeesModel.get(i)
-        if (item.name && item.name.trim()) {
-          attendees.push({ name: item.name.trim(), sex: (item.sex || "").trim() })
-        }
-      }
-      return {
-        title: root.meetingTitleText.trim(),
-        topics: root.meetingTopicsText.trim(),
-        attendees: attendees,
-        notes: root.meetingNotesText.trim()
-      }
-    } else {
-      return {
-        title: root.memoTitleText.trim(),
-        topics: root.memoTopicsText.trim(),
-        notes: root.memoNotesText.trim()
-      }
+  function startRecording(mode) {
+    var m = mode || root.selectedMode || "meeting"
+    var title = root.meetingTitleText.trim()
+    var meta = {
+      title: title,
+      topics: root.meetingTopicsText.trim(),
+      notes: root.meetingNotesText.trim(),
+      attendees: root.meetingAttendeesText.trim(),
+      mode: m
     }
-  }
-
-  function startRecord() {
-    root.isReviewingPostRecord = false
-    var mode = root.selectedMode
-    var meta = root.getFormMetadata()
-    var metaJson = JSON.stringify(meta)
-    actionProc.command = ["python3", enginePath, "start", mode, metaJson]
+    actionProc.command = ["python3", enginePath, "start", m, JSON.stringify(meta)]
     actionProc.running = true
+    root.updateStatus()
   }
 
-  function stopRecord() {
-    var mode = root.selectedMode
-    var meta = root.getFormMetadata()
-    var currentFile = root.stateObj.current_audio_file
-    var currentMode = root.stateObj.mode || root.selectedMode
-
+  function stopRecording() {
+    var title = root.meetingTitleText.trim()
+    var meta = {
+      title: title,
+      topics: root.meetingTopicsText.trim(),
+      notes: root.meetingNotesText.trim(),
+      attendees: root.meetingAttendeesText.trim(),
+      mode: root.selectedMode
+    }
     actionProc.command = ["python3", enginePath, "stop", JSON.stringify(meta)]
     actionProc.running = true
-
-    root.isReviewingPostRecord = true
-    root.reviewAudioPath = currentFile
-    root.reviewMode = currentMode
-    popupCard.open = true
-  }
-
-  function saveAndTranscribe() {
-    var meta = root.getFormMetadata()
-    var audioFile = root.reviewAudioPath || root.stateObj.current_audio_file || root.stateObj.last_processed_file
-    var mode = root.reviewMode || root.stateObj.mode || root.selectedMode
-    var title = meta.title || ""
-
-    var metaJson = JSON.stringify(meta)
-    actionProc.command = ["python3", enginePath, "transcribe", audioFile, mode, title, metaJson]
-    actionProc.running = true
-
-    root.isReviewingPostRecord = false
-    root.reviewAudioPath = ""
-    root.activeTabIndex = 1
-    root.loadHistory()
-  }
-
-  function resetForm() {
-    root.isReviewingPostRecord = false
-    root.reviewAudioPath = ""
-    root.meetingTitleText = ""
-    root.meetingTopicsText = ""
-    root.meetingNotesText = ""
-    root.memoTitleText = ""
-    root.memoTopicsText = ""
-    root.memoNotesText = ""
-    attendeesModel.clear()
-    attendeesModel.append({ name: "", sex: "" })
-    attendeesModel.append({ name: "", sex: "" })
-    attendeesModel.append({ name: "", sex: "" })
+    root.resetMeetingForm()
+    root.updateStatus()
   }
 
   function triggerTranscribe(audioFile, mode, title, speakers) {
     var t = (title || "").trim()
     var spk = (speakers || "").trim()
-    actionProc.command = ["python3", enginePath, "transcribe", audioFile, mode || "meeting", t, spk]
-    actionProc.running = true
-    root.isReviewingPostRecord = false
+    transcribeProc.command = ["python3", enginePath, "transcribe", audioFile, mode || "meeting", t, spk]
+    transcribeProc.running = true
     root.activeTabIndex = 1
+  }
+
+  function cancelTranscription() {
+    var st = Object.assign({}, root.stateObj)
+    st.is_processing = false
+    st.transcribe_pid = null
+    st.processing_stage = ""
+    st.progress_percent = 0
+    st.last_error = ""
+    root.stateObj = st
+    root.transcribeElapsedSeconds = 0
+    cancelProc.command = ["python3", enginePath, "cancel"]
+    cancelProc.running = true
+    root.updateStatus()
+  }
+
+  function clearError() {
+    var st = Object.assign({}, root.stateObj)
+    st.last_error = ""
+    root.stateObj = st
+    actionProc.command = ["python3", enginePath, "clear-error"]
+    actionProc.running = true
   }
 
   function deleteItem(audioFile) {
     if (!audioFile) return
+    if (root.currentReaderItem && root.currentReaderItem.audio_file === audioFile) {
+      root.isReaderOpen = false
+      root.currentReaderItem = null
+    }
     actionProc.command = ["python3", enginePath, "delete", audioFile]
     actionProc.running = true
   }
@@ -219,8 +168,12 @@ BarWidget {
     actionProc.running = true
   }
 
-  function openFolder() {
-    execProc.command = ["python3", enginePath, "open-storage-folder"]
+  function openFolder(folderPath) {
+    if (folderPath) {
+      execProc.command = ["xdg-open", folderPath]
+    } else {
+      execProc.command = ["python3", enginePath, "open-storage-folder"]
+    }
     execProc.running = true
   }
 
@@ -230,27 +183,71 @@ BarWidget {
     editorProc.running = true
   }
 
+  function copyText(val, label) {
+    if (!val) return
+    copyProc.command = ["wl-copy", val]
+    copyProc.running = true
+    root.copyFeedbackText = "✓ " + (label || "Copied to clipboard")
+    copyFeedbackTimer.restart()
+  }
+
+  function openReader(item, subTab) {
+    if (!item) return
+    root.currentReaderItem = item
+    root.activeReaderSubTab = (subTab !== undefined) ? subTab : (item.has_notes ? 0 : 1)
+    root.activeReaderNotesText = "Loading notes..."
+    root.activeReaderTransText = "Loading transcript..."
+    root.isReaderOpen = true
+    root.activeTabIndex = 1
+
+    if (item.notes_file) {
+      readNotesProc.command = ["python3", enginePath, "read-file", item.notes_file]
+      readNotesProc.running = true
+    } else {
+      root.activeReaderNotesText = "No structured notes generated yet.\n\nClick 'Transcribe' to process this recording with Groq Whisper & Llama."
+    }
+
+    if (item.transcript_file) {
+      readTransProc.command = ["python3", enginePath, "read-file", item.transcript_file]
+      readTransProc.running = true
+    } else {
+      root.activeReaderTransText = "No verbatim transcript generated yet.\n\nClick 'Transcribe' to process this recording with Groq Whisper & Llama."
+    }
+  }
+
   function getFilteredHistory() {
     if (!root.historyList || !Array.isArray(root.historyList)) return []
+    var list = root.historyList
     if (root.historyFilter === "meetings") {
-      return root.historyList.filter(function(item) { return item.mode === "meeting" })
+      list = list.filter(function(item) { return item.mode === "meeting" })
+    } else if (root.historyFilter === "memos") {
+      list = list.filter(function(item) { return item.mode === "mic" })
     }
-    if (root.historyFilter === "memos") {
-      return root.historyList.filter(function(item) { return item.mode === "mic" })
+    if (root.historySearchQuery && root.historySearchQuery.trim()) {
+      var q = root.historySearchQuery.toLowerCase().trim()
+      list = list.filter(function(item) {
+        return (item.title && item.title.toLowerCase().indexOf(q) !== -1) ||
+               (item.filename && item.filename.toLowerCase().indexOf(q) !== -1)
+      })
     }
-    return root.historyList
+    return list
   }
 
-  function getCurrentApiKey() {
-    if (root.selectedProvider === "groq") return root.settingsObj.groq_api_key || ""
-    if (root.selectedProvider === "openai") return root.settingsObj.openai_api_key || ""
-    return root.settingsObj.gemini_api_key || ""
+  function formatDuration(sec) {
+    if (!sec || isNaN(sec)) return "00:00"
+    var m = Math.floor(sec / 60)
+    var s = Math.floor(sec % 60)
+    var hh = Math.floor(m / 60)
+    var mm = m % 60
+    if (hh > 0) {
+      return (hh < 10 ? "0" + hh : hh) + ":" + (mm < 10 ? "0" + mm : mm) + ":" + (s < 10 ? "0" + s : s)
+    }
+    return (mm < 10 ? "0" + mm : mm) + ":" + (s < 10 ? "0" + s : s)
   }
 
-  function setCurrentApiKey(val) {
-    if (root.selectedProvider === "groq") root.settingsObj.groq_api_key = val
-    else if (root.selectedProvider === "openai") root.settingsObj.openai_api_key = val
-    else root.settingsObj.gemini_api_key = val
+  function pickDirectory() {
+    pickDirProc.command = ["python3", enginePath, "pick-directory"]
+    pickDirProc.running = true
   }
 
   // --- PROCESS DEFINITIONS ---
@@ -284,11 +281,11 @@ BarWidget {
         try {
           var parsed = JSON.parse(raw)
           root.settingsObj = parsed
-          if (parsed.provider) root.selectedProvider = parsed.provider
-          if (parsed.model) root.selectedModel = parsed.model
-          if (parsed.groq_model) root.selectedGroqModel = parsed.groq_model
-          if (parsed.openai_model) root.selectedOpenAIModel = parsed.openai_model
-          if (parsed.local_model) root.selectedLocalModel = parsed.local_model
+          if (parsed.groq_api_key !== undefined) root.settingsObj.groq_api_key = parsed.groq_api_key
+          if (parsed.groq_model) {
+            root.settingsObj.groq_model = parsed.groq_model
+            root.selectedGroqModel = parsed.groq_model
+          }
           if (parsed.default_mode) root.selectedMode = parsed.default_mode
           if (parsed.notes_format) root.selectedNotesFormat = parsed.notes_format
           if (parsed.audio_format) root.selectedAudioFormat = parsed.audio_format
@@ -298,7 +295,9 @@ BarWidget {
               storagePathInput.text = parsed.storage_path
             }
           }
-          apiKeyInput.text = root.getCurrentApiKey()
+          if (typeof apiKeyInput !== "undefined" && apiKeyInput) {
+            apiKeyInput.text = root.settingsObj.groq_api_key || ""
+          }
         } catch(e) {}
       }
     }
@@ -312,9 +311,56 @@ BarWidget {
         var raw = String(text || "").trim()
         if (!raw) return
         try {
-          root.historyList = JSON.parse(raw)
+          var parsed = JSON.parse(raw)
+          if (Array.isArray(parsed)) {
+            root.historyList = parsed
+            if (root.currentReaderItem) {
+              for (var i = 0; i < parsed.length; ++i) {
+                if (parsed[i].folder === root.currentReaderItem.folder || parsed[i].audio_file === root.currentReaderItem.audio_file) {
+                  root.currentReaderItem = parsed[i]
+                  break
+                }
+              }
+            }
+          }
         } catch(e) {}
       }
+    }
+  }
+
+  Process {
+    id: readNotesProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.activeReaderNotesText = String(text || "").trim() || "(Empty notes document)"
+      }
+    }
+  }
+
+  Process {
+    id: readTransProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.activeReaderTransText = String(text || "").trim() || "(Empty transcript document)"
+      }
+    }
+  }
+
+  Process {
+    id: transcribeProc
+    onExited: {
+      root.updateStatus()
+      root.loadHistory()
+    }
+  }
+
+  Process {
+    id: cancelProc
+    onExited: {
+      root.updateStatus()
+      root.loadHistory()
     }
   }
 
@@ -347,24 +393,10 @@ BarWidget {
             var settingsJson = JSON.stringify(root.settingsObj)
             actionProc.command = ["python3", root.enginePath, "save-settings", settingsJson]
             actionProc.running = true
-            root.saveFeedbackText = "✓ Storage folder updated!"
+            root.saveFeedbackText = "✓ Storage folder updated"
             feedbackTimer.restart()
             root.loadHistory()
           }
-        } catch(e) {}
-      }
-    }
-  }
-
-  Process {
-    id: checkWhisperProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (!raw) return
-        try {
-          root.localWhisperStatus = JSON.parse(raw)
         } catch(e) {}
       }
     }
@@ -378,8 +410,10 @@ BarWidget {
       onStreamFinished: {
         var raw = String(text || "").trim()
         if (raw) {
-          root.setCurrentApiKey(raw)
-          apiKeyInput.text = raw
+          root.settingsObj.groq_api_key = raw
+          if (typeof apiKeyInput !== "undefined" && apiKeyInput) {
+            apiKeyInput.text = raw
+          }
         }
       }
     }
@@ -395,8 +429,10 @@ BarWidget {
       if (root.stateObj.is_recording) {
         root.elapsedSeconds += 1
       }
-      if (popupCard.open && root.activeTabIndex === 1) {
-        root.loadHistory()
+      if (root.stateObj.is_processing) {
+        root.transcribeElapsedSeconds += 1
+      } else {
+        root.transcribeElapsedSeconds = 0
       }
     }
   }
@@ -409,1451 +445,704 @@ BarWidget {
     onTriggered: root.saveFeedbackText = ""
   }
 
+  Timer {
+    id: copyFeedbackTimer
+    interval: 2500
+    running: false
+    repeat: false
+    onTriggered: root.copyFeedbackText = ""
+  }
+
   Component.onCompleted: {
-    root.updateStatus()
     root.loadSettings()
     root.loadHistory()
-    root.checkWhisper()
+    root.updateStatus()
   }
 
-  function formatDuration(sec) {
-    var m = Math.floor(sec / 60)
-    var s = sec % 60
-    var h = Math.floor(m / 60)
-    m = m % 60
-    var pad = function(n) { return (n < 10 ? "0" : "") + n }
-    if (h > 0) return pad(h) + ":" + pad(m) + ":" + pad(s)
-    return pad(m) + ":" + pad(s)
-  }
-
-  function getBarText() {
-    if (root.stateObj.is_recording) {
-      return root.formatDuration(root.elapsedSeconds) + (root.stateObj.mode === "meeting" ? " (Meeting)" : " (Memo)")
-    }
-    if (root.stateObj.is_processing) {
-      return "󰑮 Transcribing..."
-    }
-    return "\ued03"
-  }
-
-  // --- BAR WIDGET BUTTON (ICON: \ued03) ---
+  // --- BAR WIDGET BUTTON (ICON ONLY ON BAR) ---
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: (root.stateObj.is_recording ? "● " : "") + root.getBarText()
-    labelVisible: false
-    horizontalMargin: 8
-    verticalPadding: 6
+    horizontalMargin: 6
+    verticalPadding: 4
 
-    RowLayout {
-      anchors.centerIn: parent
-      spacing: 6
-
-      // Pulsing Red Recording Dot
-      Rectangle {
-        id: recDot
-        visible: root.stateObj.is_recording
-        width: 8
-        height: 8
-        radius: 4
-        color: Color.urgent
-
-        SequentialAnimation on opacity {
-          running: root.stateObj.is_recording
-          loops: Animation.Infinite
-          NumberAnimation { from: 1.0; to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
-          NumberAnimation { from: 0.25; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
-        }
-
-        SequentialAnimation on scale {
-          running: root.stateObj.is_recording
-          loops: Animation.Infinite
-          NumberAnimation { from: 1.0; to: 1.25; duration: 600; easing.type: Easing.InOutQuad }
-          NumberAnimation { from: 1.25; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
-        }
+    text: {
+      if (root.stateObj.is_recording) {
+        return "\ued03 " + root.formatDuration(root.elapsedSeconds)
       }
-
-      Text {
-        text: root.getBarText()
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.body
-        color: Color.foreground
-        renderType: Text.NativeRendering
+      if (root.stateObj.is_processing) {
+        return "󰑮 " + root.formatDuration(root.transcribeElapsedSeconds)
       }
+      return "\ued03"
     }
 
     onPressed: function(btn) {
       if (btn === Qt.RightButton) {
         if (root.stateObj.is_recording) {
-          root.stopRecord()
+          root.stopRecording()
         } else {
-          root.startRecord()
+          root.startRecording(root.selectedMode || "meeting")
         }
       } else {
+        root.updateStatus()
+        root.loadHistory()
         popupCard.open = !popupCard.open
-        if (popupCard.open) {
-          root.updateStatus()
-          root.loadHistory()
-          root.loadSettings()
-        }
       }
     }
   }
 
-  // --- POPUP PANEL ---
+  // --- MAIN POPUP WINDOW (KeyboardPanel) ---
   KeyboardPanel {
     id: popupCard
     anchorItem: button
     bar: root.bar
     owner: root
     open: false
-    contentWidth: popupCard.fittedContentWidth(700)
-    contentHeight: popupCard.fittedContentHeight(750)
+    centerOnBar: true
+    contentWidth: popupCard.fittedContentWidth(780)
+    contentHeight: popupCard.fittedContentHeight(640)
 
-    ColumnLayout {
-      id: layout
+    Rectangle {
+      id: mainContainer
       anchors.fill: parent
-      spacing: 8
+      color: Color.background
+      border.width: 1
+      border.color: Util.alpha(Color.foreground, 0.12)
+      radius: 12
+      clip: true
 
-      // --- HEADER ---
-      RowLayout {
-        Layout.fillWidth: true
-        spacing: 8
+      ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 14
+        spacing: 12
 
-        Text {
-          text: "\ued03 Oma Scribe"
-          font.family: "JetBrainsMono Nerd Font"
-          font.pixelSize: Style.font.title
-          font.bold: true
-          color: Color.foreground
-        }
+        // ==========================================
+        // HEADER BAR & SEGMENTED TAB NAVIGATION
+        // ==========================================
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: 10
 
-        Item { Layout.fillWidth: true }
-
-        // Close Button
-        Rectangle {
-          width: 24
-          height: 24
-          radius: 4
-          color: closeMouse.containsMouse ? Util.alpha(Color.urgent, 0.25) : "transparent"
-
-          Text {
-            anchors.centerIn: parent
-            text: "󰅖"
-            font.family: "JetBrainsMono Nerd Font"
-            font.pixelSize: Style.font.body
-            color: Color.foreground
-          }
-
-          MouseArea {
-            id: closeMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: popupCard.open = false
-          }
-        }
-      }
-
-      // --- TOP TAB SWITCHER (3 TABS) ---
-      RowLayout {
-        Layout.fillWidth: true
-        spacing: 4
-
-        Repeater {
-          model: [
-            { idx: 0, label: "󰑊 Record" },
-            { idx: 1, label: "󰈙 Notes" },
-            { idx: 2, label: "󰒓 Settings" }
-          ]
-
-          Rectangle {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 28
-            radius: 4
-            color: root.activeTabIndex === modelData.idx ? Color.accent : (tabMouse.containsMouse ? Util.alpha(Color.foreground, 0.1) : "transparent")
-
-            Text {
-              anchors.centerIn: parent
-              text: modelData.label
-              font.family: "JetBrainsMono Nerd Font"
-              font.pixelSize: Style.font.small
-              font.bold: root.activeTabIndex === modelData.idx
-              color: root.activeTabIndex === modelData.idx ? Color.pick("background", "#1e1e2e") : Color.foreground
+          // App Title with Studio Mic Icon
+          RowLayout {
+            spacing: 8
+            Rectangle {
+              width: 32
+              height: 32
+              radius: 8
+              color: Util.alpha(Color.accent, 0.15)
+              Text {
+                anchors.centerIn: parent
+                text: "\ued03"
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 16
+                color: Color.accent
+              }
             }
+            ColumnLayout {
+              spacing: 0
+              Text {
+                text: "OMA SCRIBE"
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: Style.font.body
+                color: Color.foreground
+              }
+              Text {
+                text: "Groq LPU Audio Notes"
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 10
+                color: Color.muted
+              }
+            }
+          }
 
-            MouseArea {
-              id: tabMouse
+          Item { Layout.fillWidth: true }
+
+          // Segmented Tab Controls (Nerd Font Icons + Labels)
+          Rectangle {
+            Layout.preferredHeight: 36
+            Layout.preferredWidth: 360
+            radius: 8
+            color: Util.alpha(Color.foreground, 0.06)
+            border.width: 1
+            border.color: Util.alpha(Color.foreground, 0.10)
+
+            RowLayout {
               anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                root.activeTabIndex = modelData.idx
-                if (modelData.idx === 1) root.loadHistory()
-                if (modelData.idx === 2) {
-                  root.loadSettings()
-                  apiKeyInput.text = root.getCurrentApiKey()
+              anchors.margins: 3
+              spacing: 4
+
+              // Tab 0: Record
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 6
+                color: root.activeTabIndex === 0 ? Color.accent : "transparent"
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 6
+                  Text {
+                    text: "\ued03"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 12
+                    color: root.activeTabIndex === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground
+                  }
+                  Text {
+                    text: "Record"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.bold: true
+                    font.pixelSize: Style.font.body
+                    color: root.activeTabIndex === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground
+                  }
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.activeTabIndex = 0
+                }
+              }
+
+              // Tab 1: Library
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 6
+                color: root.activeTabIndex === 1 ? Color.accent : "transparent"
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 6
+                  Text {
+                    text: "󰎚"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 12
+                    color: root.activeTabIndex === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground
+                  }
+                  Text {
+                    text: "Library"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.bold: true
+                    font.pixelSize: Style.font.body
+                    color: root.activeTabIndex === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground
+                  }
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.activeTabIndex = 1
+                    root.loadHistory()
+                  }
+                }
+              }
+
+              // Tab 2: Settings
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 6
+                color: root.activeTabIndex === 2 ? Color.accent : "transparent"
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 6
+                  Text {
+                    text: "󰒓"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 12
+                    color: root.activeTabIndex === 2 ? Color.pick("background", "#1e1e2e") : Color.foreground
+                  }
+                  Text {
+                    text: "Settings"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.bold: true
+                    font.pixelSize: Style.font.body
+                    color: root.activeTabIndex === 2 ? Color.pick("background", "#1e1e2e") : Color.foreground
+                  }
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.activeTabIndex = 2
                 }
               }
             }
           }
-        }
-      }
 
-      Rectangle {
-        Layout.fillWidth: true
-        height: 1
-        color: Util.alpha(Color.foreground, 0.15)
-      }
-
-      // ==========================================
-      // STACKED TABS CONTAINER
-      // ==========================================
-      StackLayout {
-        id: tabStack
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-        currentIndex: root.activeTabIndex
-
-        // ------------------------------------------
-        // TAB 0: RECORD VIEW
-        // ------------------------------------------
-        ColumnLayout {
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          spacing: 8
-
-          // ========================================
-          // POST-RECORDING REVIEW BANNER (IF REVIEWING)
-          // ========================================
+          // Close Button
           Rectangle {
-            visible: root.isReviewingPostRecord && !root.stateObj.is_recording
-            Layout.fillWidth: true
-            Layout.preferredHeight: 34
-            radius: 6
-            color: Util.alpha(Color.accent, 0.15)
-            border.width: 1
-            border.color: Color.accent
+            width: 32
+            height: 32
+            radius: 8
+            color: closeMouse.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.06)
+            Text {
+              anchors.centerIn: parent
+              text: "󰅖"
+              font.family: "JetBrainsMono Nerd Font"
+              font.pixelSize: 13
+              color: Color.foreground
+            }
+            MouseArea {
+              id: closeMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: popupCard.open = false
+            }
+          }
+        }
+
+        // ==========================================
+        // DISMISSIBLE ERROR BANNER
+        // ==========================================
+        Rectangle {
+          visible: !!root.stateObj.last_error
+          Layout.fillWidth: true
+          Layout.preferredHeight: errCol.implicitHeight + 14
+          radius: 8
+          color: Util.alpha(Color.urgent, 0.12)
+          border.width: 1
+          border.color: Util.alpha(Color.urgent, 0.35)
+
+          RowLayout {
+            id: errCol
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 8
+
+            Text {
+              text: "󰅖"
+              font.family: "JetBrainsMono Nerd Font"
+              font.pixelSize: 14
+              color: Color.urgent
+            }
+
+            Text {
+              Layout.fillWidth: true
+              wrapMode: Text.WordWrap
+              font.family: "JetBrainsMono Nerd Font"
+              font.pixelSize: 10
+              color: Color.urgent
+              text: root.stateObj.last_error || ""
+            }
+
+            Rectangle {
+              width: 22
+              height: 22
+              radius: 4
+              color: Util.alpha(Color.urgent, 0.2)
+              Text {
+                anchors.centerIn: parent
+                text: "󰅖"
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 10
+                color: Color.urgent
+              }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.clearError()
+              }
+            }
+          }
+        }
+
+        // ==========================================
+        // LIVE TRANSCRIPTION HERO CARD (IN-PROGRESS)
+        // ==========================================
+        Rectangle {
+          visible: root.stateObj.is_processing
+          Layout.fillWidth: true
+          Layout.preferredHeight: transCol.implicitHeight + 16
+          radius: 8
+          color: Util.alpha(Color.accent, 0.12)
+          border.width: 1
+          border.color: Color.accent
+
+          ColumnLayout {
+            id: transCol
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 8
 
             RowLayout {
-              anchors.fill: parent
-              anchors.margins: 8
+              Layout.fillWidth: true
               spacing: 8
 
               Text {
-                text: "󰈙"
+                text: "󱐋"
                 font.family: "JetBrainsMono Nerd Font"
                 font.pixelSize: 14
                 color: Color.accent
               }
 
-              Text {
+              ColumnLayout {
                 Layout.fillWidth: true
-                text: "Recording saved! Review or fill in details above, then click Transcribe."
-                font.family: "JetBrainsMono Nerd Font"
-                font.bold: true
-                font.pixelSize: 11
-                color: Color.foreground
-                elide: Text.ElideRight
-              }
-
-              Rectangle {
-                Layout.preferredHeight: 22
-                Layout.preferredWidth: 60
-                radius: 4
-                color: Util.alpha(Color.foreground, 0.08)
-
+                spacing: 1
                 Text {
-                  anchors.centerIn: parent
-                  text: "Reset"
+                  text: "Transcribing with Groq LPU (Whisper Large v3)"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.bold: true
+                  font.pixelSize: Style.font.body
+                  color: Color.foreground
+                }
+                Text {
+                  text: root.stateObj.processing_stage || "Processing audio..."
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 10
                   color: Color.muted
+                  elide: Text.ElideRight
                 }
+              }
 
+              Text {
+                text: root.formatDuration(root.transcribeElapsedSeconds)
+                font.family: "JetBrainsMono Nerd Font"
+                font.bold: true
+                font.pixelSize: Style.font.body
+                color: Color.accent
+              }
+
+              // Cancel Button
+              Rectangle {
+                width: 76
+                height: 28
+                radius: 5
+                color: Util.alpha(Color.urgent, 0.18)
+                border.width: 1
+                border.color: Color.urgent
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 4
+                  Text { text: "󰅖"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.urgent }
+                  Text { text: "Cancel"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 10; color: Color.urgent }
+                }
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.resetForm()
+                  onClicked: root.cancelTranscription()
+                }
+              }
+            }
+
+            // Pacing Progress Bar
+            Rectangle {
+              Layout.fillWidth: true
+              Layout.preferredHeight: 6
+              radius: 3
+              color: Util.alpha(Color.foreground, 0.1)
+              clip: true
+
+              Rectangle {
+                height: parent.height
+                radius: 3
+                color: Color.accent
+                width: {
+                  var basePct = (root.stateObj.progress_percent || 5) / 100.0
+                  var est = root.stateObj.estimated_duration || 15
+                  if (basePct < 0.88) {
+                    var timeFrac = Math.min(0.85, 0.08 + (root.transcribeElapsedSeconds / est) * 0.77)
+                    var effective = Math.max(basePct, timeFrac)
+                    return Math.max(10, parent.width * Math.min(1.0, effective))
+                  }
+                  return Math.max(10, parent.width * Math.min(1.0, basePct))
+                }
+                Behavior on width {
+                  NumberAnimation { duration: 300; easing.type: Easing.OutQuad }
                 }
               }
             }
           }
-          // Live In-Progress Context Banner
+        }
+
+        // ==========================================
+        // TAB 0: RECORD VIEW
+        // ==========================================
+        ColumnLayout {
+          visible: root.activeTabIndex === 0
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          spacing: 12
+
+          // Active Hero Recording Card
           Rectangle {
-            visible: root.stateObj.is_recording
             Layout.fillWidth: true
-            Layout.preferredHeight: 34
-            radius: 6
-            color: Util.alpha(Color.urgent, 0.12)
+            Layout.preferredHeight: 110
+            radius: 10
+            color: root.stateObj.is_recording ? Util.alpha(Color.urgent, 0.12) : Util.alpha(Color.foreground, 0.04)
             border.width: 1
-            border.color: Color.urgent
+            border.color: root.stateObj.is_recording ? Color.urgent : Util.alpha(Color.foreground, 0.10)
 
             RowLayout {
               anchors.fill: parent
-              anchors.margins: 8
-              spacing: 8
+              anchors.margins: 14
+              spacing: 14
 
-              Rectangle {
-                width: 8
-                height: 8
-                radius: 4
-                color: Color.urgent
-
-                SequentialAnimation on opacity {
-                  running: root.stateObj.is_recording
-                  loops: Animation.Infinite
-                  NumberAnimation { from: 1.0; to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
-                  NumberAnimation { from: 0.25; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
-                }
-              }
-
-              Text {
-                Layout.fillWidth: true
-                text: "Recording in progress (" + root.formatDuration(root.elapsedSeconds) + ") — Details entered below are linked to this active recording."
-                font.family: "JetBrainsMono Nerd Font"
-                font.bold: true
-                font.pixelSize: 11
-                color: Color.urgent
-                elide: Text.ElideRight
-              }
-            }
-          }
-
-          // Top Mode Selector
-          RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-
-            // Meeting Mode Button
-            Rectangle {
-              Layout.fillWidth: true
-              Layout.preferredHeight: 36
-              radius: 6
-              border.width: 1
-              border.color: root.selectedMode === "meeting" ? Color.accent : Util.alpha(Color.foreground, 0.15)
-              color: root.selectedMode === "meeting" ? Util.alpha(Color.accent, 0.15) : (m1Mouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-              RowLayout {
-                anchors.centerIn: parent
-                spacing: 6
-                Text {
-                  text: "\uf4fd"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: Style.font.body
-                  color: root.selectedMode === "meeting" ? Color.accent : Color.foreground
-                }
-                Text {
-                  text: "Meeting"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.bold: true
-                  font.pixelSize: Style.font.body
-                  color: root.selectedMode === "meeting" ? Color.accent : Color.foreground
-                }
-              }
-
-              MouseArea {
-                id: m1Mouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.selectedMode = "meeting"
-              }
-            }
-
-            // Voice Memo Button
-            Rectangle {
-              Layout.fillWidth: true
-              Layout.preferredHeight: 36
-              radius: 6
-              border.width: 1
-              border.color: root.selectedMode === "mic" ? Color.accent : Util.alpha(Color.foreground, 0.15)
-              color: root.selectedMode === "mic" ? Util.alpha(Color.accent, 0.15) : (m2Mouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-              RowLayout {
-                anchors.centerIn: parent
-                spacing: 6
-                Text {
-                  text: "󰍬"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: Style.font.body
-                  color: root.selectedMode === "mic" ? Color.accent : Color.foreground
-                }
-                Text {
-                  text: "Voice Memo"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.bold: true
-                  font.pixelSize: Style.font.body
-                  color: root.selectedMode === "mic" ? Color.accent : Color.foreground
-                }
-              }
-
-              MouseArea {
-                id: m2Mouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.selectedMode = "mic"
-              }
-            }
-          }
-
-          // ==========================================
-          // SCROLLABLE PRE-MEETING / PRE-RECORD FORM (FULL WIDTH)
-          // ==========================================
-          ScrollView {
-            id: formScroll
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            clip: true
-            contentWidth: availableWidth
-
-            ColumnLayout {
-              width: formScroll.availableWidth
-              Layout.fillWidth: true
-              spacing: 10
-
-              // --- MEETING MODE FORM ---
+              // Mode Switcher Pills (Meeting vs Voice Memo)
               ColumnLayout {
-                visible: root.selectedMode === "meeting"
-                Layout.fillWidth: true
-                width: parent.width
-                spacing: 10
-
-                // Meeting Title
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  width: parent.width
-                  spacing: 3
-                  Text {
-                    text: "Meeting Title:"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.bold: true
-                    font.pixelSize: Style.font.small
-                    color: Color.foreground
-                  }
-                  Rectangle {
-                    Layout.fillWidth: true
-                    width: parent.width
-                    Layout.preferredHeight: 34
-                    radius: 4
-                    color: Util.alpha(Color.foreground, 0.08)
-                    border.width: 1
-                    border.color: mTitleIn.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
-                    TextInput {
-                      id: mTitleIn
-                      anchors.fill: parent
-                      anchors.margins: 8
-                      activeFocusOnTab: true
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                      text: root.meetingTitleText
-                      onTextChanged: root.meetingTitleText = text
-                      Keys.onTabPressed: mTopicsIn.forceActiveFocus()
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Meeting Title"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: Style.font.small
-                        color: Color.muted
-                        visible: !mTitleIn.text && !mTitleIn.activeFocus
-                      }
-                    }
-                  }
+                spacing: 6
+                Text {
+                  text: "Recording Mode:"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.bold: true
+                  font.pixelSize: Style.font.body
+                  color: Color.foreground
                 }
 
-                // Meeting Topics
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  width: parent.width
-                  spacing: 3
-                  Text {
-                    text: "Meeting Topics:"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.bold: true
-                    font.pixelSize: Style.font.small
-                    color: Color.foreground
-                  }
-                  Rectangle {
-                    Layout.fillWidth: true
-                    width: parent.width
-                    Layout.preferredHeight: 34
-                    radius: 4
-                    color: Util.alpha(Color.foreground, 0.08)
-                    border.width: 1
-                    border.color: mTopicsIn.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
-                    TextInput {
-                      id: mTopicsIn
-                      anchors.fill: parent
-                      anchors.margins: 8
-                      activeFocusOnTab: true
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                      text: root.meetingTopicsText
-                      onTextChanged: root.meetingTopicsText = text
-                      Keys.onTabPressed: {
-                        if (attendeesRepeater.count > 0) {
-                          attendeesRepeater.itemAt(0).focusName()
-                        } else {
-                          mNotesIn.forceActiveFocus()
-                        }
-                      }
-                      Keys.onBacktabPressed: mTitleIn.forceActiveFocus()
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Meeting Topics"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: Style.font.small
-                        color: Color.muted
-                        visible: !mTopicsIn.text && !mTopicsIn.activeFocus
-                      }
-                    }
-                  }
-                }
-
-                // Dynamic Attendees Section (3 by default + Add Button)
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  width: parent.width
+                RowLayout {
                   spacing: 8
-
-                  RowLayout {
-                    Layout.fillWidth: true
-                    Text {
-                      text: "Meeting Attendees:"
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.bold: true
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                    }
-                    Item { Layout.fillWidth: true }
-                  }
-
-                  Repeater {
-                    id: attendeesRepeater
-                    model: attendeesModel
-
-                    RowLayout {
-                      id: attRowItem
-                      Layout.fillWidth: true
-                      width: parent.width
-                      spacing: 8
-
-                      function focusName() { nameIn.forceActiveFocus() }
-
-                      // Attendee Name (60% of window width)
-                      ColumnLayout {
-                        Layout.preferredWidth: Math.floor(formScroll.availableWidth * 0.60)
-                        spacing: 2
-                        Text {
-                          text: "Name:"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.bold: true
-                          font.pixelSize: Style.font.small
-                          color: Color.foreground
-                        }
-                        Rectangle {
-                          Layout.fillWidth: true
-                          Layout.preferredHeight: 34
-                          radius: 4
-                          color: Util.alpha(Color.foreground, 0.08)
-                          border.width: 1
-                          border.color: nameIn.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
-                          TextInput {
-                            id: nameIn
-                            anchors.fill: parent
-                            anchors.margins: 8
-                            activeFocusOnTab: true
-                            font.family: "JetBrainsMono Nerd Font"
-                            font.pixelSize: Style.font.small
-                            color: Color.foreground
-                            text: model.name
-                            onTextChanged: model.name = text
-                            Keys.onTabPressed: {
-                              if (index + 1 < attendeesRepeater.count) {
-                                attendeesRepeater.itemAt(index + 1).focusName()
-                              } else {
-                                mNotesIn.forceActiveFocus()
-                              }
-                            }
-                            Keys.onBacktabPressed: {
-                              if (index > 0) {
-                                attendeesRepeater.itemAt(index - 1).focusName()
-                              } else {
-                                mTopicsIn.forceActiveFocus()
-                              }
-                            }
-                            Text {
-                              anchors.verticalCenter: parent.verticalCenter
-                              text: "Name"
-                              font.family: "JetBrainsMono Nerd Font"
-                              font.pixelSize: Style.font.small
-                              color: Color.muted
-                              visible: !nameIn.text && !nameIn.activeFocus
-                            }
-                          }
-                        }
-                      }
-
-                      // Attendee Gender Radio Group (Male / Female)
-                      ColumnLayout {
-                        Layout.preferredWidth: 160
-                        Layout.leftMargin: 8
-                        spacing: 2
-                        Text {
-                          text: "Gender:"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.bold: true
-                          font.pixelSize: Style.font.small
-                          color: Color.foreground
-                        }
-
-                        RowLayout {
-                          Layout.fillWidth: true
-                          Layout.preferredHeight: 34
-                          spacing: 4
-
-                          // Male Option
-                          Item {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-
-                            RowLayout {
-                              anchors.verticalCenter: parent.verticalCenter
-                              anchors.left: parent.left
-                              spacing: 5
-
-                              // Round Radio Outer Circle
-                              Rectangle {
-                                width: 14
-                                height: 14
-                                radius: 7
-                                color: "transparent"
-                                border.width: 2
-                                border.color: model.sex === "Male" ? Color.accent : (maleMouse.containsMouse ? Color.foreground : Util.alpha(Color.foreground, 0.35))
-
-                                // Inner Filled Circle
-                                Rectangle {
-                                  anchors.centerIn: parent
-                                  width: 6
-                                  height: 6
-                                  radius: 3
-                                  color: Color.accent
-                                  visible: model.sex === "Male"
-                                }
-                              }
-
-                              Text {
-                                text: "Male"
-                                font.family: "JetBrainsMono Nerd Font"
-                                font.bold: model.sex === "Male"
-                                font.pixelSize: Style.font.small
-                                color: model.sex === "Male" ? Color.accent : (maleMouse.containsMouse ? Color.foreground : Util.alpha(Color.foreground, 0.85))
-                              }
-                            }
-
-                            MouseArea {
-                              id: maleMouse
-                              anchors.fill: parent
-                              hoverEnabled: true
-                              cursorShape: Qt.PointingHandCursor
-                              onClicked: model.sex = (model.sex === "Male" ? "" : "Male")
-                            }
-                          }
-
-                          // Female Option
-                          Item {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-
-                            RowLayout {
-                              anchors.verticalCenter: parent.verticalCenter
-                              anchors.left: parent.left
-                              spacing: 5
-
-                              // Round Radio Outer Circle
-                              Rectangle {
-                                width: 14
-                                height: 14
-                                radius: 7
-                                color: "transparent"
-                                border.width: 2
-                                border.color: model.sex === "Female" ? Color.accent : (femaleMouse.containsMouse ? Color.foreground : Util.alpha(Color.foreground, 0.35))
-
-                                // Inner Filled Circle
-                                Rectangle {
-                                  anchors.centerIn: parent
-                                  width: 6
-                                  height: 6
-                                  radius: 3
-                                  color: Color.accent
-                                  visible: model.sex === "Female"
-                                }
-                              }
-
-                              Text {
-                                text: "Female"
-                                font.family: "JetBrainsMono Nerd Font"
-                                font.bold: model.sex === "Female"
-                                font.pixelSize: Style.font.small
-                                color: model.sex === "Female" ? Color.accent : (femaleMouse.containsMouse ? Color.foreground : Util.alpha(Color.foreground, 0.85))
-                              }
-                            }
-
-                            MouseArea {
-                              id: femaleMouse
-                              anchors.fill: parent
-                              hoverEnabled: true
-                              cursorShape: Qt.PointingHandCursor
-                              onClicked: model.sex = (model.sex === "Female" ? "" : "Female")
-                            }
-                          }
-                        }
-                      }
-
-                      // Delete Attendee Row (if > 1)
-                      Rectangle {
-                        visible: attendeesModel.count > 1
-                        Layout.alignment: Qt.AlignBottom
-                        Layout.preferredWidth: 34
-                        Layout.preferredHeight: 34
-                        radius: 4
-                        color: delAttMouse.containsMouse ? Util.alpha(Color.urgent, 0.25) : Util.alpha(Color.foreground, 0.06)
-
-                        Text {
-                          anchors.centerIn: parent
-                          text: "✕"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.pixelSize: 11
-                          color: delAttMouse.containsMouse ? Color.urgent : Color.muted
-                        }
-
-                        MouseArea {
-                          id: delAttMouse
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: attendeesModel.remove(index)
-                        }
-                      }
-                    }
-                  }
-
-                  // Add Attendee Button
                   Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 30
-                    radius: 4
-                    color: addAttMouse.containsMouse ? Util.alpha(Color.accent, 0.2) : Util.alpha(Color.accent, 0.08)
+                    implicitWidth: meetingTextRow.implicitWidth + 24
+                    height: 38
+                    radius: 6
+                    enabled: !root.stateObj.is_recording
+                    color: root.selectedMode === "meeting" ? Util.alpha(Color.accent, 0.2) : Util.alpha(Color.foreground, 0.06)
                     border.width: 1
-                    border.color: Color.accent
+                    border.color: root.selectedMode === "meeting" ? Color.accent : "transparent"
 
                     RowLayout {
+                      id: meetingTextRow
                       anchors.centerIn: parent
                       spacing: 6
-                      Text { text: "+"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.accent }
-                      Text { text: "Add Attendee"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.small; color: Color.accent }
+                      Text { text: "󰋋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: root.selectedMode === "meeting" ? Color.accent : Color.muted }
+                      Text { text: "Online Meeting"; font.family: "JetBrainsMono Nerd Font"; font.bold: root.selectedMode === "meeting"; font.pixelSize: Style.font.body; color: root.selectedMode === "meeting" ? Color.accent : Color.foreground }
                     }
-
                     MouseArea {
-                      id: addAttMouse
                       anchors.fill: parent
-                      hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: attendeesModel.append({ name: "", sex: "" })
+                      onClicked: root.selectedMode = "meeting"
                     }
                   }
-                }
 
-                // Additional Notes
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  width: parent.width
-                  spacing: 3
-                  Text {
-                    text: "Additional Notes:"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.bold: true
-                    font.pixelSize: Style.font.small
-                    color: Color.foreground
-                  }
                   Rectangle {
-                    Layout.fillWidth: true
-                    width: parent.width
-                    Layout.preferredHeight: 52
-                    radius: 4
-                    color: Util.alpha(Color.foreground, 0.08)
+                    implicitWidth: memoTextRow.implicitWidth + 24
+                    height: 38
+                    radius: 6
+                    enabled: !root.stateObj.is_recording
+                    color: root.selectedMode === "mic" ? Util.alpha(Color.accent, 0.2) : Util.alpha(Color.foreground, 0.06)
                     border.width: 1
-                    border.color: mNotesIn.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
-                    TextInput {
-                      id: mNotesIn
+                    border.color: root.selectedMode === "mic" ? Color.accent : "transparent"
+
+                    RowLayout {
+                      id: memoTextRow
+                      anchors.centerIn: parent
+                      spacing: 6
+                      Text { text: "\ued03"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: root.selectedMode === "mic" ? Color.accent : Color.muted }
+                      Text { text: "Voice Memo"; font.family: "JetBrainsMono Nerd Font"; font.bold: root.selectedMode === "mic"; font.pixelSize: Style.font.body; color: root.selectedMode === "mic" ? Color.accent : Color.foreground }
+                    }
+                    MouseArea {
                       anchors.fill: parent
-                      anchors.margins: 8
-                      activeFocusOnTab: true
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                      text: root.meetingNotesText
-                      onTextChanged: root.meetingNotesText = text
-                      Keys.onBacktabPressed: {
-                        if (attendeesRepeater.count > 0) {
-                          attendeesRepeater.itemAt(attendeesRepeater.count - 1).focusName()
-                        } else {
-                          mTopicsIn.forceActiveFocus()
-                        }
-                      }
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Additional Notes"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: Style.font.small
-                        color: Color.muted
-                        visible: !mNotesIn.text && !mNotesIn.activeFocus
-                      }
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.selectedMode = "mic"
                     }
                   }
                 }
               }
 
-              // --- VOICE MEMO FORM ---
+              Item { Layout.fillWidth: true }
+
+              // Live Timer & Status Display
               ColumnLayout {
-                visible: root.selectedMode === "mic"
-                Layout.fillWidth: true
-                width: parent.width
-                spacing: 10
-
-                // Memo Title
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  width: parent.width
-                  spacing: 3
-                  Text {
-                    text: "Memo Title:"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.bold: true
-                    font.pixelSize: Style.font.small
-                    color: Color.foreground
-                  }
-                  Rectangle {
-                    Layout.fillWidth: true
-                    width: parent.width
-                    Layout.preferredHeight: 34
-                    radius: 4
-                    color: Util.alpha(Color.foreground, 0.08)
-                    border.width: 1
-                    border.color: memoTitleIn.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
-                    TextInput {
-                      id: memoTitleIn
-                      anchors.fill: parent
-                      anchors.margins: 8
-                      activeFocusOnTab: true
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                      text: root.memoTitleText
-                      onTextChanged: root.memoTitleText = text
-                      Keys.onTabPressed: memoTopicsIn.forceActiveFocus()
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Memo Title"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: Style.font.small
-                        color: Color.muted
-                        visible: !memoTitleIn.text && !memoTitleIn.activeFocus
-                      }
-                    }
-                  }
-                }
-
-                // Memo Topics
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  width: parent.width
-                  spacing: 3
-                  Text {
-                    text: "Memo Context / Key Topics:"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.bold: true
-                    font.pixelSize: Style.font.small
-                    color: Color.foreground
-                  }
-                  Rectangle {
-                    Layout.fillWidth: true
-                    width: parent.width
-                    Layout.preferredHeight: 34
-                    radius: 4
-                    color: Util.alpha(Color.foreground, 0.08)
-                    border.width: 1
-                    border.color: memoTopicsIn.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
-                    TextInput {
-                      id: memoTopicsIn
-                      anchors.fill: parent
-                      anchors.margins: 8
-                      activeFocusOnTab: true
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                      text: root.memoTopicsText
-                      onTextChanged: root.memoTopicsText = text
-                      Keys.onTabPressed: memoNotesIn.forceActiveFocus()
-                      Keys.onBacktabPressed: memoTitleIn.forceActiveFocus()
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Memo Context"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: Style.font.small
-                        color: Color.muted
-                        visible: !memoTopicsIn.text && !memoTopicsIn.activeFocus
-                      }
-                    }
-                  }
-                }
-
-                // Memo Additional Notes
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  width: parent.width
-                  spacing: 3
-                  Text {
-                    text: "Additional Notes:"
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.bold: true
-                    font.pixelSize: Style.font.small
-                    color: Color.foreground
-                  }
-                  Rectangle {
-                    Layout.fillWidth: true
-                    width: parent.width
-                    Layout.preferredHeight: 52
-                    radius: 4
-                    color: Util.alpha(Color.foreground, 0.08)
-                    border.width: 1
-                    border.color: memoNotesIn.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
-                    TextInput {
-                      id: memoNotesIn
-                      anchors.fill: parent
-                      anchors.margins: 8
-                      activeFocusOnTab: true
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.foreground
-                      text: root.memoNotesText
-                      onTextChanged: root.memoNotesText = text
-                      Keys.onBacktabPressed: memoTopicsIn.forceActiveFocus()
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Additional Notes"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: Style.font.small
-                        color: Color.muted
-                        visible: !memoNotesIn.text && !memoNotesIn.activeFocus
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          // ==========================================
-          // PINNED BOTTOM ACTION SECTION
-          // ==========================================
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 6
-
-            // Mode Description Line
-            Rectangle {
-              Layout.fillWidth: true
-              Layout.preferredHeight: 26
-              radius: 4
-              color: Util.alpha(Color.foreground, 0.05)
-
-              RowLayout {
-                anchors.centerIn: parent
-                spacing: 6
+                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                spacing: 2
                 Text {
-                  text: root.selectedMode === "meeting" ? "\uf4fd" : "󰍬"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 11
-                  color: Color.accent
-                }
-                Text {
-                  text: root.selectedMode === "meeting" ? "Captures mic + system audio (Zoom, Signal, Teams, Calls, etc.)" : "Captures microphone only (solo dictation, ideas, memos)"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 11
-                  color: Color.muted
-                }
-              }
-            }
-
-            // Big Action Button (Start / Stop / Save & Transcribe)
-            Rectangle {
-              Layout.fillWidth: true
-              Layout.preferredHeight: 56
-              radius: 8
-              color: root.stateObj.is_recording ? Color.urgent : Color.accent
-
-              RowLayout {
-                anchors.centerIn: parent
-                spacing: 12
-
-                Text {
-                  text: root.stateObj.is_recording ? "󰓛" : (root.isReviewingPostRecord ? "\ued03" : "󰑊")
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 24
-                  color: root.stateObj.is_recording ? "#ffffff" : Color.pick("background", "#1e1e2e")
-                }
-
-                Text {
-                  text: root.stateObj.is_recording ? ("STOP RECORDING (" + root.formatDuration(root.elapsedSeconds) + ")") : (root.isReviewingPostRecord ? "Save & Transcribe Details" : (root.selectedMode === "meeting" ? "Start Meeting Recording" : "Start Voice Memo"))
+                  text: root.stateObj.is_recording ? "RECORDING IN PROGRESS" : "READY TO RECORD"
                   font.family: "JetBrainsMono Nerd Font"
                   font.bold: true
-                  font.pixelSize: Style.font.title
-                  color: root.stateObj.is_recording ? "#ffffff" : Color.pick("background", "#1e1e2e")
+                  font.pixelSize: 10
+                  color: root.stateObj.is_recording ? Color.urgent : Color.muted
                 }
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  if (root.stateObj.is_recording) {
-                    root.stopRecord()
-                  } else if (root.isReviewingPostRecord) {
-                    root.saveAndTranscribe()
-                  } else {
-                    root.startRecord()
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        // ------------------------------------------
-        // TAB 1: NOTES VIEW (WITH DELETE BUTTON & DIRECT ACTIONS)
-        // ------------------------------------------
-        ColumnLayout {
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          spacing: 8
-
-          // Header + Sub-Tabs
-          RowLayout {
-            Layout.fillWidth: true
-            spacing: 6
-
-            Repeater {
-              model: [
-                { id: "all", label: "󰈙 All" },
-                { id: "meetings", label: "\uf4fd Meeting Notes" },
-                { id: "memos", label: "󰍬 Audio Notes" }
-              ]
-
-              Rectangle {
-                Layout.preferredHeight: 26
-                Layout.preferredWidth: filterText.implicitWidth + 16
-                radius: 4
-                color: root.historyFilter === modelData.id ? Color.accent : (subTabMouse.containsMouse ? Util.alpha(Color.foreground, 0.1) : Util.alpha(Color.foreground, 0.05))
-
                 Text {
-                  id: filterText
-                  anchors.centerIn: parent
-                  text: modelData.label
+                  text: root.formatDuration(root.elapsedSeconds)
                   font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 11
-                  font.bold: root.historyFilter === modelData.id
-                  color: root.historyFilter === modelData.id ? Color.pick("background", "#1e1e2e") : Color.foreground
+                  font.bold: true
+                  font.pixelSize: 22
+                  color: root.stateObj.is_recording ? Color.urgent : Color.foreground
+                }
+              }
+
+              // Primary Record / Stop Button
+              Rectangle {
+                width: 110
+                height: 48
+                radius: 8
+                color: root.stateObj.is_recording ? Color.urgent : Color.accent
+
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 6
+                  Text {
+                    text: root.stateObj.is_recording ? "󰓛" : "\ued03"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 14
+                    color: Color.pick("background", "#1e1e2e")
+                  }
+                  Text {
+                    text: root.stateObj.is_recording ? "Stop" : "Record"
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.bold: true
+                    font.pixelSize: Style.font.body
+                    color: Color.pick("background", "#1e1e2e")
+                  }
                 }
 
                 MouseArea {
-                  id: subTabMouse
                   anchors.fill: parent
-                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.historyFilter = modelData.id
+                  onClicked: {
+                    if (root.stateObj.is_recording) {
+                      root.stopRecording()
+                    } else {
+                      root.startRecording(root.selectedMode)
+                    }
+                  }
                 }
-              }
-            }
-
-            Item { Layout.fillWidth: true }
-
-            Rectangle {
-              width: 76
-              height: 26
-              radius: 4
-              color: Util.alpha(Color.foreground, 0.08)
-              RowLayout {
-                anchors.centerIn: parent
-                spacing: 4
-                Text {
-                  text: "󰉋"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 11
-                  color: Color.foreground
-                }
-                Text {
-                  text: "Folder"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 11
-                  color: Color.foreground
-                }
-              }
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.openFolder()
               }
             }
           }
 
-          // History List
-          ScrollView {
+          // Pre-Meeting Context Section
+          Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
+            radius: 10
+            color: Util.alpha(Color.foreground, 0.03)
+            border.width: 1
+            border.color: Util.alpha(Color.foreground, 0.08)
 
-            ListView {
-              model: root.getFilteredHistory()
-              spacing: 6
-              delegate: Rectangle {
-                id: itemCard
-                width: parent ? parent.width : 660
-                height: 58
+            ColumnLayout {
+              anchors.fill: parent
+              anchors.margins: 12
+              spacing: 10
+
+              RowLayout {
+                Layout.fillWidth: true
+                Text {
+                  text: "Meeting Context & Agenda (Optional)"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.bold: true
+                  font.pixelSize: Style.font.body
+                  color: Color.foreground
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                  text: "Provides AI context for speaker recognition"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.pixelSize: 10
+                  color: Color.muted
+                }
+              }
+
+              // Meeting Title
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 36
                 radius: 6
-                color: Util.alpha(Color.foreground, 0.05)
+                color: Util.alpha(Color.foreground, 0.06)
                 border.width: 1
-                border.color: Util.alpha(Color.foreground, 0.1)
+                border.color: titleInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.12)
 
-                property bool isTranscribingThis: root.stateObj.is_processing && (!modelData.has_notes || root.stateObj.last_processed_file === modelData.audio_file)
-                property bool isEditingTitle: false
-
-                // Left column: Mode icon, Title, metadata
-                ColumnLayout {
-                  anchors.left: parent.left
-                  anchors.leftMargin: 12
-                  anchors.right: actionTray.left
-                  anchors.rightMargin: 12
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: 3
-
-                  // Title Row (Display or Edit mode)
-                  RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 6
-
-                    Text {
-                      text: modelData.mode === "meeting" ? "\uf4fd" : "󰍬"
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
-                      color: Color.accent
-                    }
-
-                    // Normal Title Display with Edit Pencil Icon
-                    RowLayout {
-                      visible: !itemCard.isEditingTitle
-                      Layout.fillWidth: true
-                      spacing: 6
-
-                      Text {
-                        text: modelData.title || modelData.filename
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: Style.font.small
-                        color: Color.foreground
-                        elide: Text.ElideRight
-                      }
-
-                      // Rename Pencil Icon Button
-                      Rectangle {
-                        width: 20
-                        height: 20
-                        radius: 3
-                        color: editMouse.containsMouse ? Util.alpha(Color.accent, 0.2) : "transparent"
-
-                        Text {
-                          anchors.centerIn: parent
-                          text: "󰏫"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.pixelSize: 11
-                          color: editMouse.containsMouse ? Color.accent : Util.alpha(Color.foreground, 0.4)
-                        }
-
-                        MouseArea {
-                          id: editMouse
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: {
-                            itemCard.isEditingTitle = true
-                            editInput.text = modelData.title || modelData.filename
-                            editInput.forceActiveFocus()
-                          }
-                        }
-                      }
-                    }
-
-                    // Inline Title Edit Field with Save / Cancel Buttons
-                    RowLayout {
-                      visible: itemCard.isEditingTitle
-                      Layout.fillWidth: true
-                      spacing: 4
-
-                      Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 24
-                        radius: 4
-                        color: Util.alpha(Color.foreground, 0.08)
-                        border.width: 1
-                        border.color: Color.accent
-
-                        TextInput {
-                          id: editInput
-                          anchors.fill: parent
-                          anchors.leftMargin: 6
-                          anchors.rightMargin: 6
-                          verticalAlignment: TextInput.AlignVCenter
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.pixelSize: Style.font.small
-                          font.bold: true
-                          color: Color.foreground
-                          selectByMouse: true
-                          Keys.onReturnPressed: {
-                            if (text.trim() && text.trim() !== modelData.title) {
-                              root.renameNote(modelData.audio_file, text.trim())
-                            }
-                            itemCard.isEditingTitle = false
-                          }
-                          Keys.onEscapePressed: {
-                            itemCard.isEditingTitle = false
-                          }
-                        }
-                      }
-
-                      // Save Button (✓)
-                      Rectangle {
-                        width: 22
-                        height: 22
-                        radius: 3
-                        color: saveEditMouse.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.2)
-
-                        Text {
-                          anchors.centerIn: parent
-                          text: "✓"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.bold: true
-                          font.pixelSize: 11
-                          color: saveEditMouse.containsMouse ? Color.pick("background", "#1e1e2e") : Color.accent
-                        }
-
-                        MouseArea {
-                          id: saveEditMouse
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: {
-                            if (editInput.text.trim() && editInput.text.trim() !== modelData.title) {
-                              root.renameNote(modelData.audio_file, editInput.text.trim())
-                            }
-                            itemCard.isEditingTitle = false
-                          }
-                        }
-                      }
-
-                      // Cancel Button (✕)
-                      Rectangle {
-                        width: 22
-                        height: 22
-                        radius: 3
-                        color: cancelEditMouse.containsMouse ? Util.alpha(Color.urgent, 0.2) : Util.alpha(Color.foreground, 0.1)
-
-                        Text {
-                          anchors.centerIn: parent
-                          text: "✕"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.pixelSize: 10
-                          color: cancelEditMouse.containsMouse ? Color.urgent : Color.muted
-                        }
-
-                        MouseArea {
-                          id: cancelEditMouse
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: {
-                            itemCard.isEditingTitle = false
-                          }
-                        }
-                      }
-                    }
-                  }
+                TextInput {
+                  id: titleInput
+                  anchors.fill: parent
+                  anchors.leftMargin: 10
+                  anchors.rightMargin: 10
+                  verticalAlignment: TextInput.AlignVCenter
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.pixelSize: Style.font.body
+                  color: Color.foreground
+                  text: root.meetingTitleText
+                  onTextChanged: root.meetingTitleText = text
 
                   Text {
-                    Layout.fillWidth: true
-                    text: modelData.date + "  •  " + modelData.size_kb + " KB  •  " + (modelData.mode === "meeting" ? "Meeting" : "Voice Memo")
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Meeting Title"
                     font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: 10
+                    font.pixelSize: Style.font.body
                     color: Color.muted
-                    elide: Text.ElideRight
+                    visible: !titleInput.text && !titleInput.activeFocus
                   }
                 }
+              }
 
-                // Right column: Action Buttons Tray
-                RowLayout {
-                  id: actionTray
-                  anchors.right: parent.right
-                  anchors.rightMargin: 12
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: 6
+              // Agenda / Topics Input
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.06)
+                border.width: 1
+                border.color: topicsInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.12)
 
-                  // ACTION BUTTON: Notes
-                  Rectangle {
-                    visible: modelData.has_notes
-                    width: 78
-                    height: 28
-                    radius: 4
-                    color: notesMouse.containsMouse ? Util.alpha(Color.accent, 0.35) : Util.alpha(Color.accent, 0.18)
-                    border.width: 1
-                    border.color: Color.accent
+                ScrollView {
+                  anchors.fill: parent
+                  anchors.margins: 8
+                  clip: true
 
-                    RowLayout {
-                      anchors.centerIn: parent
-                      spacing: 4
-                      Text {
-                        text: "󰈙"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: 10
-                        color: Color.accent
-                      }
-                      Text {
-                        text: "Notes"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: 10
-                        color: Color.accent
-                      }
-                    }
-
-                    MouseArea {
-                      id: notesMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.openInEditor(modelData.notes_file)
-                    }
-                  }
-
-                  // ACTION BUTTON: Transcript
-                  Rectangle {
-                    visible: modelData.has_transcript
-                    width: 98
-                    height: 28
-                    radius: 4
-                    color: transMouse.containsMouse ? Util.alpha(Color.accent, 0.35) : Util.alpha(Color.accent, 0.18)
-                    border.width: 1
-                    border.color: Color.accent
-
-                    RowLayout {
-                      anchors.centerIn: parent
-                      spacing: 4
-                      Text {
-                        text: "󰈙"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: 10
-                        color: Color.accent
-                      }
-                      Text {
-                        text: "Transcript"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: 10
-                        color: Color.accent
-                      }
-                    }
-
-                    MouseArea {
-                      id: transMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.openInEditor(modelData.transcript_file)
-                    }
-                  }
-
-                  // ACTION BUTTON: Transcribe Status / Pulsing Transcribing Badge
-                  Rectangle {
-                    id: transBadge
-                    visible: !modelData.has_notes
-                    implicitWidth: transContentRow.implicitWidth + 24
-                    implicitHeight: 28
-                    radius: 4
-                    color: itemCard.isTranscribingThis ? Util.alpha(Color.urgent, 0.18) : (trMouse.containsMouse ? Color.pick("accent-hover", Color.accent) : Color.accent)
-                    border.width: itemCard.isTranscribingThis ? 1 : 0
-                    border.color: Color.urgent
-
-                    SequentialAnimation on opacity {
-                      running: itemCard.isTranscribingThis
-                      loops: Animation.Infinite
-                      NumberAnimation { from: 1.0; to: 0.35; duration: 650; easing.type: Easing.InOutQuad }
-                      NumberAnimation { from: 0.35; to: 1.0; duration: 650; easing.type: Easing.InOutQuad }
-                    }
-
-                    RowLayout {
-                      id: transContentRow
-                      anchors.centerIn: parent
-                      spacing: 6
-
-                      Text {
-                        text: itemCard.isTranscribingThis ? "󰑮" : "󰑊"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: 12
-                        color: itemCard.isTranscribingThis ? Color.urgent : Color.pick("background", "#1e1e2e")
-                      }
-
-                      Text {
-                        text: itemCard.isTranscribingThis ? "Transcribing..." : "Transcribe"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: 11
-                        color: itemCard.isTranscribingThis ? Color.urgent : Color.pick("background", "#1e1e2e")
-                      }
-                    }
-
-                    MouseArea {
-                      id: trMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: itemCard.isTranscribingThis ? Qt.ArrowCursor : Qt.PointingHandCursor
-                      enabled: !itemCard.isTranscribingThis
-                      onClicked: root.triggerTranscribe(modelData.audio_file, modelData.mode, modelData.title, "")
-                    }
-                  }
-
-                  // ACTION BUTTON: Delete Recording & Folder
-                  Rectangle {
-                    implicitWidth: 30
-                    implicitHeight: 28
-                    radius: 4
-                    color: deleteMouse.containsMouse ? Util.alpha(Color.urgent, 0.25) : Util.alpha(Color.foreground, 0.08)
+                  TextArea {
+                    id: topicsInput
+                    wrapMode: Text.WordWrap
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: Style.font.body
+                    color: Color.foreground
+                    text: root.meetingTopicsText
+                    onTextChanged: root.meetingTopicsText = text
 
                     Text {
-                      anchors.centerIn: parent
-                      text: "✕"
+                      anchors.top: parent.top
+                      anchors.left: parent.left
+                      text: "Agenda Topics and Notes"
                       font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: 11
-                      color: deleteMouse.containsMouse ? Color.urgent : Color.muted
+                      font.pixelSize: Style.font.body
+                      color: Color.muted
+                      visible: !topicsInput.text && !topicsInput.activeFocus
                     }
+                  }
+                }
+              }
 
-                    MouseArea {
-                      id: deleteMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.deleteItem(modelData.audio_file)
+              // Expected Attendees Input Row (Clean Full-Width Input)
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Text {
+                  text: "Attendees:"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.bold: true
+                  font.pixelSize: 11
+                  color: Color.foreground
+                }
+
+                Rectangle {
+                  Layout.fillWidth: true
+                  Layout.preferredHeight: 34
+                  radius: 6
+                  color: Util.alpha(Color.foreground, 0.06)
+                  border.width: 1
+                  border.color: attInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.12)
+
+                  TextInput {
+                    id: attInput
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    verticalAlignment: TextInput.AlignVCenter
+                    selectByMouse: true
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 11
+                    color: Color.foreground
+                    text: root.meetingAttendeesText
+                    onTextChanged: root.meetingAttendeesText = text
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Enter all Attendee Names and Male/Female to assist the transcription. Host should be first name."
+                      font.family: "JetBrainsMono Nerd Font"
+                      font.pixelSize: 10
+                      color: Color.muted
+                      visible: !attInput.text && !attInput.activeFocus
+                      elide: Text.ElideRight
                     }
                   }
                 }
@@ -1862,239 +1151,549 @@ BarWidget {
           }
         }
 
-        // ------------------------------------------
-        // TAB 2: MULTI-PROVIDER SETTINGS VIEW (WITH FREE TIER GUIDES)
-        // ------------------------------------------
-        ScrollView {
+        // ==========================================
+        // TAB 1: LIBRARY & IN-APP READER VIEW
+        // ==========================================
+        ColumnLayout {
+          visible: root.activeTabIndex === 1
           Layout.fillWidth: true
           Layout.fillHeight: true
-          clip: true
-          contentWidth: availableWidth
+          spacing: 10
 
+          // ----------------------------------------------------
+          // SUB-VIEW A: IN-APP NOTE & TRANSCRIPT READER
+          // ----------------------------------------------------
           ColumnLayout {
-            width: parent.width
+            visible: root.isReaderOpen && !!root.currentReaderItem
             Layout.fillWidth: true
-            spacing: 12
+            Layout.fillHeight: true
+            spacing: 8
 
-            // Section 1: AI Provider Selector
-            Text {
-              text: "Select AI Provider:"
-              font.family: "JetBrainsMono Nerd Font"
-              font.bold: true
-              font.pixelSize: Style.font.small
-              color: Color.foreground
-            }
-
+            // Top Reader Navigation & Action Bar
             RowLayout {
               Layout.fillWidth: true
-              spacing: 6
+              spacing: 8
 
-              Repeater {
-                model: [
-                  { id: "gemini", icon: "󰊭", name: "Google Gemini", badge: "Free (1,500/day)" },
-                  { id: "groq",   icon: "󱐋", name: "Groq Cloud",   badge: "Free (Fast LPU)" },
-                  { id: "local",  icon: "󰒋", name: "Local Whisper", badge: "100% Offline Free" },
-                  { id: "openai", icon: "󰘚", name: "OpenAI",       badge: "Pay-As-You-Go" }
-                ]
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 48
-                  radius: 6
-                  border.width: 1
-                  border.color: root.selectedProvider === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.15)
-                  color: root.selectedProvider === modelData.id ? Util.alpha(Color.accent, 0.15) : (provMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-                  ColumnLayout {
-                    anchors.centerIn: parent
-                    spacing: 2
-
-                    RowLayout {
-                      Layout.alignment: Qt.AlignHCenter
-                      spacing: 4
-                      Text {
-                        text: modelData.icon
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: 12
-                        color: root.selectedProvider === modelData.id ? Color.accent : Color.foreground
-                      }
-                      Text {
-                        text: modelData.name
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: 11
-                        color: root.selectedProvider === modelData.id ? Color.accent : Color.foreground
-                      }
-                    }
-
-                    Text {
-                      Layout.alignment: Qt.AlignHCenter
-                      text: modelData.badge
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: 9
-                      color: root.selectedProvider === modelData.id ? Color.accent : Color.muted
-                    }
-                  }
-
-                  MouseArea {
-                    id: provMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                      root.selectedProvider = modelData.id
-                      root.settingsObj.provider = modelData.id
-                      apiKeyInput.text = root.getCurrentApiKey()
-                    }
-                  }
+              // Back Button
+              Rectangle {
+                width: 86
+                height: 32
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.08)
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 4
+                  Text { text: "󰁍"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: Color.foreground }
+                  Text { text: "Library"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.foreground }
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.isReaderOpen = false
                 }
               }
-            }
 
-            // Section 2: Dynamic Provider Setup & Guide Box
-            Rectangle {
-              Layout.fillWidth: true
-              Layout.preferredHeight: guideCol.implicitHeight + 18
-              radius: 6
-              color: root.selectedProvider === "local" ? (root.localWhisperStatus.installed ? Util.alpha(Color.accent, 0.08) : Util.alpha(Color.urgent, 0.08)) : Util.alpha(Color.foreground, 0.04)
-              border.width: 1
-              border.color: root.selectedProvider === "local" ? (root.localWhisperStatus.installed ? Color.accent : Color.urgent) : Util.alpha(Color.foreground, 0.12)
-
+              // Title and Mode Badge
               ColumnLayout {
-                id: guideCol
-                anchors.fill: parent
-                anchors.margins: 10
-                spacing: 6
+                Layout.fillWidth: true
+                spacing: 0
+                Text {
+                  text: root.currentReaderItem ? root.currentReaderItem.title : ""
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.bold: true
+                  font.pixelSize: Style.font.body
+                  color: Color.foreground
+                  elide: Text.ElideRight
+                }
+                Text {
+                  text: root.currentReaderItem ? (root.currentReaderItem.date + " • " + root.currentReaderItem.size_kb + " KB") : ""
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.pixelSize: 10
+                  color: Color.muted
+                }
+              }
+
+              // Sub-Tabs: Notes vs Transcript
+              Rectangle {
+                Layout.preferredHeight: 32
+                Layout.preferredWidth: 220
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.08)
 
                 RowLayout {
-                  spacing: 6
-                  Text {
-                    text: {
-                      if (root.selectedProvider === "local") {
-                        return root.localWhisperStatus.installed ? "󰄬" : "󰅖"
-                      }
-                      return "󰋼"
-                    }
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: 12
-                    color: root.selectedProvider === "local" ? (root.localWhisperStatus.installed ? Color.accent : Color.urgent) : Color.accent
-                  }
-                  Text {
-                    text: {
-                      if (root.selectedProvider === "gemini") return "Google Gemini Setup (Free Tier: 1,500 Requests/Day)"
-                      if (root.selectedProvider === "groq") return "Groq Cloud Setup (Free Tier: Blazing Fast LPU Inference)"
-                      if (root.selectedProvider === "local") {
-                        return root.localWhisperStatus.installed ? ("Local Whisper Ready (" + root.localWhisperStatus.engine + ")") : "Local Whisper Not Installed"
-                      }
-                      return "OpenAI Setup (Whisper-1 + GPT-4o)"
-                    }
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.bold: true
-                    font.pixelSize: 11
-                    color: Color.foreground
-                  }
-                  Item { Layout.fillWidth: true }
+                  anchors.fill: parent
+                  anchors.margins: 2
+                  spacing: 2
+
                   Rectangle {
-                    visible: root.selectedProvider === "local"
-                    width: 70
-                    height: 22
-                    radius: 3
-                    color: Util.alpha(Color.foreground, 0.1)
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 5
+                    color: root.activeReaderSubTab === 0 ? Color.accent : "transparent"
                     RowLayout {
                       anchors.centerIn: parent
-                      spacing: 3
-                      Text { text: "󰑐"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9; color: Color.foreground }
-                      Text { text: "Re-check"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9; color: Color.foreground }
+                      spacing: 4
+                      Text { text: "󰎚"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      Text { text: "Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
                     }
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: root.checkWhisper()
+                      onClicked: root.activeReaderSubTab = 0
+                    }
+                  }
+
+                  Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 5
+                    color: root.activeReaderSubTab === 1 ? Color.accent : "transparent"
+                    RowLayout {
+                      anchors.centerIn: parent
+                      spacing: 4
+                      Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                      Text { text: "Transcript"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
+                    }
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.activeReaderSubTab = 1
                     }
                   }
                 }
+              }
 
+              // Copy Button
+              Rectangle {
+                width: 76
+                height: 32
+                radius: 6
+                color: Util.alpha(Color.accent, 0.18)
+                border.width: 1
+                border.color: Color.accent
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 4
+                  Text { text: "󰆏"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: Color.accent }
+                  Text { text: "Copy"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    var txt = root.activeReaderSubTab === 0 ? root.activeReaderNotesText : root.activeReaderTransText
+                    root.copyText(txt, root.activeReaderSubTab === 0 ? "Notes copied" : "Transcript copied")
+                  }
+                }
+              }
+
+              // External Editor Button
+              Rectangle {
+                width: 32
+                height: 32
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.08)
                 Text {
-                  Layout.fillWidth: true
+                  anchors.centerIn: parent
+                  text: "󰏫"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.pixelSize: 13
+                  color: Color.foreground
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (!root.currentReaderItem) return
+                    var fp = root.activeReaderSubTab === 0 ? root.currentReaderItem.notes_file : root.currentReaderItem.transcript_file
+                    root.openInEditor(fp || root.currentReaderItem.audio_file)
+                  }
+                }
+              }
+
+              // Folder Button
+              Rectangle {
+                width: 32
+                height: 32
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.08)
+                Text {
+                  anchors.centerIn: parent
+                  text: "󰉋"
+                  font.family: "JetBrainsMono Nerd Font"
+                  font.pixelSize: 13
+                  color: Color.foreground
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (root.currentReaderItem) root.openFolder(root.currentReaderItem.folder)
+                  }
+                }
+              }
+            }
+
+            // Copy Feedback Toast
+            Text {
+              visible: !!root.copyFeedbackText
+              Layout.alignment: Qt.AlignRight
+              text: root.copyFeedbackText
+              font.family: "JetBrainsMono Nerd Font"
+              font.bold: true
+              font.pixelSize: 10
+              color: Color.accent
+            }
+
+            // Text Reader View Box
+            Rectangle {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              radius: 8
+              color: Util.alpha(Color.foreground, 0.04)
+              border.width: 1
+              border.color: Util.alpha(Color.foreground, 0.10)
+
+              ScrollView {
+                anchors.fill: parent
+                anchors.margins: 14
+                clip: true
+
+                TextArea {
+                  readOnly: true
+                  selectByMouse: true
                   wrapMode: Text.WordWrap
                   font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 10
-                  color: Color.muted
-                  text: {
-                    if (root.selectedProvider === "gemini") {
-                      return "1. Visit aistudio.google.com and sign in with any Google account (Free, no credit card required).\n2. Click 'Get API key' -> 'Create API key in new project'.\n3. Paste the key (AIzaSy...) below. Direct multimodal audio with speaker intonation recognition."
+                  font.pixelSize: 11
+                  color: Color.foreground
+                  text: root.activeReaderSubTab === 0 ? root.activeReaderNotesText : root.activeReaderTransText
+                }
+              }
+            }
+          }
+
+          // ----------------------------------------------------
+          // SUB-VIEW B: RECORDINGS LIST
+          // ----------------------------------------------------
+          ColumnLayout {
+            visible: !root.isReaderOpen
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 8
+
+            // Filter Bar & Search Box
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+
+              // Filter Pills: All / Meetings / Memos
+              Rectangle {
+                Layout.preferredHeight: 32
+                Layout.preferredWidth: 260
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.06)
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.margins: 2
+                  spacing: 2
+
+                  Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 5
+                    color: root.historyFilter === "all" ? Color.accent : "transparent"
+                    Text {
+                      anchors.centerIn: parent
+                      text: "All (" + root.historyList.length + ")"
+                      font.family: "JetBrainsMono Nerd Font"
+                      font.bold: true
+                      font.pixelSize: 10
+                      color: root.historyFilter === "all" ? Color.pick("background", "#1e1e2e") : Color.foreground
                     }
-                    if (root.selectedProvider === "groq") {
-                      return "1. Visit console.groq.com and create a free account.\n2. Navigate to 'API Keys' -> 'Create API Key'.\n3. Paste the key (gsk_...) below. Groq transcribes 1-hour audio in ~3 seconds using Whisper Large v3 on LPUs."
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.historyFilter = "all"
                     }
-                    if (root.selectedProvider === "local") {
-                      if (root.localWhisperStatus.installed) {
-                        var cachedInfo = (root.localWhisperStatus.cached_models && root.localWhisperStatus.cached_models.length > 0) ? ("\n• Cached models ready offline: " + root.localWhisperStatus.cached_models.join(", ")) : ""
-                        return "• Engine is installed and ready for 100% offline transcription." + cachedInfo + "\n• Model weights automatically download on your very first transcription and remain cached permanently."
-                      }
-                      return "Local Whisper runs 100% on your device with zero data leaving your machine.\nTo install the official package on Arch Linux, run the command below in your terminal:"
+                  }
+
+                  Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 5
+                    color: root.historyFilter === "meetings" ? Color.accent : "transparent"
+                    Text {
+                      anchors.centerIn: parent
+                      text: "Meetings"
+                      font.family: "JetBrainsMono Nerd Font"
+                      font.bold: true
+                      font.pixelSize: 10
+                      color: root.historyFilter === "meetings" ? Color.pick("background", "#1e1e2e") : Color.foreground
                     }
-                    return "1. Visit platform.openai.com/api-keys and log in to your OpenAI account.\n2. Generate a Secret API Key (sk-...) and ensure your account has usage credits.\n3. Uses OpenAI Whisper-1 transcription paired with GPT-4o for meeting summarization."
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.historyFilter = "meetings"
+                    }
+                  }
+
+                  Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 5
+                    color: root.historyFilter === "memos" ? Color.accent : "transparent"
+                    Text {
+                      anchors.centerIn: parent
+                      text: "Memos"
+                      font.family: "JetBrainsMono Nerd Font"
+                      font.bold: true
+                      font.pixelSize: 10
+                      color: root.historyFilter === "memos" ? Color.pick("background", "#1e1e2e") : Color.foreground
+                    }
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.historyFilter = "memos"
+                    }
                   }
                 }
+              }
 
-                // Interactive Install Command Box for Local Whisper (if not installed)
-                Rectangle {
-                  visible: root.selectedProvider === "local" && !root.localWhisperStatus.installed
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 32
-                  radius: 4
-                  color: Util.alpha(Color.foreground, 0.08)
-                  border.width: 1
-                  border.color: Util.alpha(Color.foreground, 0.15)
+              // Search Bar
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 32
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.06)
+                border.width: 1
+                border.color: searchInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.12)
 
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 6
-                    spacing: 8
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: 8
+                  anchors.rightMargin: 8
+                  spacing: 6
+                  Text { text: "󰍉"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: Color.muted }
+                  TextInput {
+                    id: searchInput
+                    Layout.fillWidth: true
+                    verticalAlignment: TextInput.AlignVCenter
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 11
+                    color: Color.foreground
+                    text: root.historySearchQuery
+                    onTextChanged: root.historySearchQuery = text
 
                     Text {
-                      Layout.fillWidth: true
-                      text: root.localWhisperStatus.install_command || "sudo pacman -S python-openai-whisper"
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Search recordings..."
                       font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: 10
-                      color: Color.accent
-                      elide: Text.ElideRight
+                      font.pixelSize: 11
+                      color: Color.muted
+                      visible: !searchInput.text && !searchInput.activeFocus
                     }
+                  }
+                }
+              }
 
-                    Rectangle {
-                      width: 80
-                      height: 22
-                      radius: 3
-                      color: copyMouse.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.2)
+              // Storage Folder Button
+              Rectangle {
+                width: 86
+                height: 32
+                radius: 6
+                color: Util.alpha(Color.foreground, 0.08)
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 4
+                  Text { text: "󰉋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: Color.foreground }
+                  Text { text: "Folder"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.foreground }
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openFolder()
+                }
+              }
+            }
 
-                      RowLayout {
-                        anchors.centerIn: parent
-                        spacing: 3
+            // Scrollable List of Recordings
+            Rectangle {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              radius: 8
+              color: Util.alpha(Color.foreground, 0.02)
+              border.width: 1
+              border.color: Util.alpha(Color.foreground, 0.08)
+
+              ScrollView {
+                anchors.fill: parent
+                anchors.margins: 8
+                clip: true
+
+                ListView {
+                  id: historyView
+                  spacing: 6
+                  model: root.getFilteredHistory()
+
+                  delegate: Rectangle {
+                    id: cardDelegate
+                    width: historyView.width - 4
+                    height: 52
+                    radius: 6
+                    color: cardMouse.containsMouse ? Util.alpha(Color.foreground, 0.06) : Util.alpha(Color.foreground, 0.03)
+                    border.width: 1
+                    border.color: isTranscribingThis ? Color.accent : Util.alpha(Color.foreground, 0.08)
+
+                    readonly property bool isTranscribingThis: root.stateObj.is_processing && root.stateObj.current_audio_file === modelData.audio_file
+
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.leftMargin: 10
+                      anchors.rightMargin: 10
+                      spacing: 8
+
+                      // Mode Icon
+                      Rectangle {
+                        width: 32
+                        height: 32
+                        radius: 6
+                        color: modelData.mode === "meeting" ? Util.alpha(Color.accent, 0.15) : Util.alpha(Color.foreground, 0.10)
                         Text {
-                          text: "󰅍"
+                          anchors.centerIn: parent
+                          text: modelData.mode === "meeting" ? "󰋋" : "\ued03"
                           font.family: "JetBrainsMono Nerd Font"
-                          font.pixelSize: 9
-                          color: copyMouse.containsMouse ? Color.pick("background", "#1e1e2e") : Color.accent
-                        }
-                        Text {
-                          text: "Copy"
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.bold: true
-                          font.pixelSize: 9
-                          color: copyMouse.containsMouse ? Color.pick("background", "#1e1e2e") : Color.accent
+                          font.pixelSize: 13
+                          color: modelData.mode === "meeting" ? Color.accent : Color.foreground
                         }
                       }
 
-                      MouseArea {
-                        id: copyMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                          root.copyText(root.localWhisperStatus.install_command || "sudo pacman -S python-openai-whisper")
-                          root.saveFeedbackText = "✓ Copied install command to clipboard!"
-                          feedbackTimer.restart()
+                      // Title & Metadata
+                      ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 1
+                        Text {
+                          text: modelData.title || modelData.filename
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.bold: true
+                          font.pixelSize: Style.font.body
+                          color: Color.foreground
+                          elide: Text.ElideRight
+                        }
+                        Text {
+                          text: modelData.date + " • " + modelData.size_kb + " KB" + (modelData.has_notes ? " • Notes Ready" : " • Audio Only")
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.pixelSize: 10
+                          color: modelData.has_notes ? Color.accent : Color.muted
+                        }
+                      }
+
+                      // Action Button 1: Notes (Opens In-App Reader)
+                      Rectangle {
+                        visible: modelData.has_notes
+                        width: 72
+                        height: 28
+                        radius: 5
+                        color: Util.alpha(Color.accent, 0.15)
+                        RowLayout {
+                          anchors.centerIn: parent
+                          spacing: 4
+                          Text { text: "󰎚"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.accent }
+                          Text { text: "Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 10; color: Color.accent }
+                        }
+                        MouseArea {
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.openReader(modelData, 0)
+                        }
+                      }
+
+                      // Action Button 2: Transcript (Opens In-App Reader)
+                      Rectangle {
+                        visible: modelData.has_transcript
+                        width: 86
+                        height: 28
+                        radius: 5
+                        color: Util.alpha(Color.foreground, 0.08)
+                        RowLayout {
+                          anchors.centerIn: parent
+                          spacing: 4
+                          Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.foreground }
+                          Text { text: "Transcript"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 10; color: Color.foreground }
+                        }
+                        MouseArea {
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.openReader(modelData, 1)
+                        }
+                      }
+
+                      // Transcribe Button
+                      Rectangle {
+                        width: isTranscribingThis ? 110 : (modelData.has_notes ? 32 : 96)
+                        height: 28
+                        radius: 5
+                        color: isTranscribingThis ? Util.alpha(Color.accent, 0.25) : (modelData.has_notes ? Util.alpha(Color.foreground, 0.08) : Color.accent)
+
+                        RowLayout {
+                          anchors.centerIn: parent
+                          spacing: 4
+                          Text {
+                            text: isTranscribingThis ? "󰑮" : "󱐋"
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 11
+                            color: isTranscribingThis ? Color.accent : (modelData.has_notes ? Color.foreground : Color.pick("background", "#1e1e2e"))
+                          }
+                          Text {
+                            visible: !modelData.has_notes || isTranscribingThis
+                            text: isTranscribingThis ? "Transcribing..." : "Transcribe"
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.bold: true
+                            font.pixelSize: 10
+                            color: isTranscribingThis ? Color.accent : Color.pick("background", "#1e1e2e")
+                          }
+                        }
+
+                        MouseArea {
+                          anchors.fill: parent
+                          enabled: !isTranscribingThis
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.triggerTranscribe(modelData.audio_file, modelData.mode, modelData.title, "")
+                        }
+                      }
+
+                      // Trash Button
+                      Rectangle {
+                        width: 28
+                        height: 28
+                        radius: 5
+                        color: trashMouse.containsMouse ? Util.alpha(Color.urgent, 0.2) : "transparent"
+                        Text {
+                          anchors.centerIn: parent
+                          text: "󰅖"
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.pixelSize: 11
+                          color: trashMouse.containsMouse ? Color.urgent : Color.muted
+                        }
+                        MouseArea {
+                          id: trashMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.deleteItem(modelData.audio_file)
+                        }
+                      }
+                    }
+
+                    MouseArea {
+                      id: cardMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      z: -1
+                      onClicked: {
+                        if (modelData.has_notes || modelData.has_transcript) {
+                          root.openReader(modelData)
                         }
                       }
                     }
@@ -2102,22 +1701,56 @@ BarWidget {
                 }
               }
             }
+          }
+        }
 
-            // Section 3: API Key Input (Hidden for Local Whisper)
+        // ==========================================
+        // TAB 2: SETTINGS VIEW
+        // ==========================================
+        ScrollView {
+          visible: root.activeTabIndex === 2
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          clip: true
+
+          ColumnLayout {
+            width: mainContainer.width - 28
+            spacing: 14
+
+            // Groq LPU Banner
+            Rectangle {
+              Layout.fillWidth: true
+              implicitHeight: lpuBannerRow.implicitHeight + 20
+              radius: 8
+              color: Util.alpha(Color.accent, 0.12)
+              border.width: 1
+              border.color: Color.accent
+
+              RowLayout {
+                id: lpuBannerRow
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
+                Text { text: "󱐋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 20; color: Color.accent }
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: 2
+                  Text { text: "Groq Cloud LPU Pipeline (Free Tier)"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.foreground }
+                  Text { text: "Whisper Large v3 (Audio) + Llama 3.1 70B (Synthesis) • 3-second processing"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                }
+              }
+            }
+
+            // Groq API Key Input
             ColumnLayout {
-              visible: root.selectedProvider !== "local"
               Layout.fillWidth: true
               spacing: 6
 
               Text {
-                text: {
-                  if (root.selectedProvider === "groq") return "Groq Cloud API Key:"
-                  if (root.selectedProvider === "openai") return "OpenAI Secret API Key:"
-                  return "Google Gemini API Key:"
-                }
+                text: "Groq API Key:"
                 font.family: "JetBrainsMono Nerd Font"
                 font.bold: true
-                font.pixelSize: Style.font.small
+                font.pixelSize: Style.font.body
                 color: Color.foreground
               }
 
@@ -2130,9 +1763,9 @@ BarWidget {
                   Layout.preferredHeight: 36
                   radius: 6
                   clip: true
-                  color: Util.alpha(Color.foreground, 0.08)
+                  color: Util.alpha(Color.foreground, 0.06)
                   border.width: 1
-                  border.color: apiKeyInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
+                  border.color: apiKeyInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.12)
 
                   TextInput {
                     id: apiKeyInput
@@ -2143,23 +1776,23 @@ BarWidget {
                     clip: true
                     echoMode: root.showApiKey ? TextInput.Normal : TextInput.Password
                     font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: Style.font.small
+                    font.pixelSize: Style.font.body
                     color: Color.foreground
-                    text: root.getCurrentApiKey()
-                    onTextChanged: root.setCurrentApiKey(text)
+                    text: root.settingsObj.groq_api_key || ""
+                    onTextChanged: root.settingsObj.groq_api_key = text
 
                     Text {
                       anchors.verticalCenter: parent.verticalCenter
-                      text: root.selectedProvider === "groq" ? "Paste your Groq API key (gsk_...)" : (root.selectedProvider === "openai" ? "Paste your OpenAI key (sk-...)" : "Paste your Google AI Studio key (AIzaSy...)")
+                      text: "Paste your Groq API key (gsk_...)"
                       font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.font.small
+                      font.pixelSize: Style.font.body
                       color: Color.muted
                       visible: !apiKeyInput.text && !apiKeyInput.activeFocus
                     }
                   }
                 }
 
-                // Eye toggle
+                // Show/Hide Toggle
                 Rectangle {
                   width: 36
                   height: 36
@@ -2169,7 +1802,7 @@ BarWidget {
                     anchors.centerIn: parent
                     text: root.showApiKey ? "󰈉" : "󰈈"
                     font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: 14
                     color: Color.foreground
                   }
                   MouseArea {
@@ -2181,12 +1814,12 @@ BarWidget {
                   }
                 }
 
-                // Paste button
+                // Paste Button
                 Rectangle {
-                  width: 76
+                  width: 80
                   height: 36
                   radius: 6
-                  color: pasteMouse.containsMouse ? Util.alpha(Color.accent, 0.3) : Util.alpha(Color.accent, 0.15)
+                  color: Util.alpha(Color.accent, 0.18)
                   RowLayout {
                     anchors.centerIn: parent
                     spacing: 4
@@ -2204,159 +1837,16 @@ BarWidget {
               }
             }
 
-            // Section 4: Model Selection Cards
-            Text {
-              text: "Select Model Architecture:"
-              font.family: "JetBrainsMono Nerd Font"
-              font.bold: true
-              font.pixelSize: Style.font.small
-              color: Color.foreground
-            }
-
-            ColumnLayout {
-              Layout.fillWidth: true
-              spacing: 6
-
-              // Gemini Models
-              Repeater {
-                model: root.selectedProvider === "gemini" ? [
-                  { id: "gemini-3.7-flash", icon: "󱐋", name: "Gemini 3.7 Flash", desc: "Flagship (Default) • Latest acoustic reasoning & pitch/voice diarization" },
-                  { id: "gemini-2.5-flash", icon: "󱐋", name: "Gemini 2.5 Flash", desc: "Ultra-Stable Backup • Rock-solid free tier uptime and balanced speed" }
-                ] : []
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 44
-                  radius: 6
-                  border.width: 1
-                  border.color: root.selectedModel === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
-                  color: root.selectedModel === modelData.id ? Util.alpha(Color.accent, 0.15) : (gMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 8
-                    Text { text: modelData.icon; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: Style.font.body; color: root.selectedModel === modelData.id ? Color.accent : Color.muted }
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 1
-                      Text { text: modelData.name; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.small; color: root.selectedModel === modelData.id ? Color.accent : Color.foreground }
-                      Text { text: modelData.desc; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.muted; elide: Text.ElideRight }
-                    }
-                    Text { visible: root.selectedModel === modelData.id; text: "✓"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; color: Color.accent }
-                  }
-                  MouseArea { id: gMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.selectedModel = modelData.id; root.settingsObj.model = modelData.id } }
-                }
-              }
-
-              // Groq Models
-              Repeater {
-                model: root.selectedProvider === "groq" ? [
-                  { id: "llama-3.3-70b-versatile", icon: "󱐋", name: "Whisper Large v3 + Llama 3.3 70B", desc: "Recommended • 70B parameter deep reasoning and formatted synthesis" },
-                  { id: "llama-3.1-8b-instant",     icon: "󱐋", name: "Whisper Large v3 + Llama 3.1 8B",  desc: "Instant • Lightweight high-speed summary generation" }
-                ] : []
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 44
-                  radius: 6
-                  border.width: 1
-                  border.color: root.selectedGroqModel === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
-                  color: root.selectedGroqModel === modelData.id ? Util.alpha(Color.accent, 0.15) : (grqMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 8
-                    Text { text: modelData.icon; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: Style.font.body; color: root.selectedGroqModel === modelData.id ? Color.accent : Color.muted }
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 1
-                      Text { text: modelData.name; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.small; color: root.selectedGroqModel === modelData.id ? Color.accent : Color.foreground }
-                      Text { text: modelData.desc; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.muted; elide: Text.ElideRight }
-                    }
-                    Text { visible: root.selectedGroqModel === modelData.id; text: "✓"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; color: Color.accent }
-                  }
-                  MouseArea { id: grqMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.selectedGroqModel = modelData.id; root.settingsObj.groq_model = modelData.id } }
-                }
-              }
-
-              // OpenAI Models
-              Repeater {
-                model: root.selectedProvider === "openai" ? [
-                  { id: "gpt-4o-mini", icon: "󰘚", name: "Whisper-1 + GPT-4o-mini", desc: "Fast & Cost-Effective • High accuracy audio transcript + fast notes" },
-                  { id: "gpt-4o",      icon: "󰘚", name: "Whisper-1 + GPT-4o",      desc: "Flagship • Maximum reasoning capability for complex discussions" }
-                ] : []
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 44
-                  radius: 6
-                  border.width: 1
-                  border.color: root.selectedOpenAIModel === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
-                  color: root.selectedOpenAIModel === modelData.id ? Util.alpha(Color.accent, 0.15) : (oaMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 8
-                    Text { text: modelData.icon; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: Style.font.body; color: root.selectedOpenAIModel === modelData.id ? Color.accent : Color.muted }
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 1
-                      Text { text: modelData.name; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.small; color: root.selectedOpenAIModel === modelData.id ? Color.accent : Color.foreground }
-                      Text { text: modelData.desc; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.muted; elide: Text.ElideRight }
-                    }
-                    Text { visible: root.selectedOpenAIModel === modelData.id; text: "✓"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; color: Color.accent }
-                  }
-                  MouseArea { id: oaMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.selectedOpenAIModel = modelData.id; root.settingsObj.openai_model = modelData.id } }
-                }
-              }
-
-              // Local Offline Models
-              Repeater {
-                model: root.selectedProvider === "local" ? [
-                  { id: "base",   icon: "󰒋", name: "Whisper Base",   desc: "Fast (~140 MB model) • Low CPU usage, rapid offline turnaround" },
-                  { id: "small",  icon: "󰒋", name: "Whisper Small",  desc: "Balanced (~460 MB model) • Higher accuracy for meeting dialogues" },
-                  { id: "medium", icon: "󰒋", name: "Whisper Medium", desc: "High Accuracy (~1.5 GB model) • Optimal for noisy environments" }
-                ] : []
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.preferredHeight: 44
-                  radius: 6
-                  border.width: 1
-                  border.color: root.selectedLocalModel === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
-                  color: root.selectedLocalModel === modelData.id ? Util.alpha(Color.accent, 0.15) : (locMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 8
-                    Text { text: modelData.icon; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: Style.font.body; color: root.selectedLocalModel === modelData.id ? Color.accent : Color.muted }
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 1
-                      Text { text: modelData.name; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.small; color: root.selectedLocalModel === modelData.id ? Color.accent : Color.foreground }
-                      Text { text: modelData.desc; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10; color: Color.muted; elide: Text.ElideRight }
-                    }
-                    Text { visible: root.selectedLocalModel === modelData.id; text: "✓"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; color: Color.accent }
-                  }
-                  MouseArea { id: locMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.selectedLocalModel = modelData.id; root.settingsObj.local_model = modelData.id } }
-                }
-              }
-            }
-
-            // Section 5: Storage Folder Location
+            // Storage Folder Location
             ColumnLayout {
               Layout.fillWidth: true
               spacing: 6
 
               Text {
-                text: "Storage Location (Notes & Recordings):"
+                text: "Storage Location (Notes & Audio):"
                 font.family: "JetBrainsMono Nerd Font"
                 font.bold: true
-                font.pixelSize: Style.font.small
+                font.pixelSize: Style.font.body
                 color: Color.foreground
               }
 
@@ -2369,9 +1859,9 @@ BarWidget {
                   Layout.preferredHeight: 36
                   radius: 6
                   clip: true
-                  color: Util.alpha(Color.foreground, 0.08)
+                  color: Util.alpha(Color.foreground, 0.06)
                   border.width: 1
-                  border.color: storagePathInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.18)
+                  border.color: storagePathInput.activeFocus ? Color.accent : Util.alpha(Color.foreground, 0.12)
 
                   TextInput {
                     id: storagePathInput
@@ -2380,31 +1870,26 @@ BarWidget {
                     anchors.rightMargin: 10
                     verticalAlignment: TextInput.AlignVCenter
                     font.family: "JetBrainsMono Nerd Font"
-                    font.pixelSize: Style.font.small
+                    font.pixelSize: Style.font.body
                     color: Color.foreground
                     text: root.settingsObj.storage_path || (Quickshell.env("HOME") + "/Documents/AudioNotes")
                     onTextChanged: root.settingsObj.storage_path = text
                   }
                 }
 
-                // Browse Button (opens Zenity directory picker)
                 Rectangle {
-                  width: 92
+                  width: 96
                   height: 36
                   radius: 6
-                  color: browseMouse.containsMouse ? Util.alpha(Color.accent, 0.3) : Util.alpha(Color.accent, 0.15)
-
+                  color: Util.alpha(Color.accent, 0.18)
                   RowLayout {
                     anchors.centerIn: parent
                     spacing: 4
                     Text { text: "󰉋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11; color: Color.accent }
                     Text { text: "Browse"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
                   }
-
                   MouseArea {
-                    id: browseMouse
                     anchors.fill: parent
-                    hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.pickDirectory()
                   }
@@ -2412,180 +1897,118 @@ BarWidget {
               }
             }
 
-            // Section 6: Notes Document Format
+            // Document & Audio Format Selectors (Non-Crushed Pill Grids)
             ColumnLayout {
               Layout.fillWidth: true
-              spacing: 6
+              spacing: 12
 
-              Text {
-                text: "Notes & Transcript Document Format:"
-                font.family: "JetBrainsMono Nerd Font"
-                font.bold: true
-                font.pixelSize: Style.font.small
-                color: Color.foreground
-              }
-
-              RowLayout {
+              // Document Format
+              ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 8
-
-                Repeater {
-                  model: [
-                    { id: "md",   name: "Markdown (.md)",   desc: "Standard headings, bold, bullet points" },
-                    { id: "txt",  name: "Plain Text (.txt)", desc: "Clean stripped text with zero tags" },
-                    { id: "html", name: "HTML (.html)",     desc: "Standalone styled document" }
-                  ]
-
-                  Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 38
-                    radius: 6
-                    border.width: 1
-                    border.color: root.selectedNotesFormat === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
-                    color: root.selectedNotesFormat === modelData.id ? Util.alpha(Color.accent, 0.15) : (fmtMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-                    RowLayout {
-                      anchors.fill: parent
-                      anchors.margins: 8
-                      spacing: 6
-
+                spacing: 6
+                Text { text: "Document Format:"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.foreground }
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: 8
+                  Repeater {
+                    model: [
+                      { id: "md", name: "Markdown (.md)" },
+                      { id: "txt", name: "Plain (.txt)" },
+                      { id: "html", name: "HTML (.html)" }
+                    ]
+                    Rectangle {
+                      Layout.fillWidth: true
+                      height: 36
+                      radius: 6
+                      color: root.selectedNotesFormat === modelData.id ? Util.alpha(Color.accent, 0.2) : Util.alpha(Color.foreground, 0.05)
+                      border.width: 1
+                      border.color: root.selectedNotesFormat === modelData.id ? Color.accent : "transparent"
                       Text {
-                        Layout.fillWidth: true
+                        anchors.centerIn: parent
                         text: modelData.name
                         font.family: "JetBrainsMono Nerd Font"
                         font.bold: root.selectedNotesFormat === modelData.id
                         font.pixelSize: 11
                         color: root.selectedNotesFormat === modelData.id ? Color.accent : Color.foreground
-                        elide: Text.ElideRight
                       }
-
-                      Text {
-                        visible: root.selectedNotesFormat === modelData.id
-                        text: "✓"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: 11
-                        color: Color.accent
+                      MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.selectedNotesFormat = modelData.id
                       }
-                    }
-
-                    MouseArea {
-                      id: fmtMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.selectedNotesFormat = modelData.id
                     }
                   }
                 }
               }
-            }
 
-            // Section 7: Audio Recording Format
-            ColumnLayout {
-              Layout.fillWidth: true
-              spacing: 6
-
-              Text {
-                text: "Audio Recording Format:"
-                font.family: "JetBrainsMono Nerd Font"
-                font.bold: true
-                font.pixelSize: Style.font.small
-                color: Color.foreground
-              }
-
-              RowLayout {
+              // Audio Format
+              ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 6
-
-                Repeater {
-                  model: [
-                    { id: "opus", name: "Opus (.opus)", desc: "Best quality / size (~10MB/hr)" },
-                    { id: "mp3",  name: "MP3 (.mp3)",   desc: "Universal compatibility" },
-                    { id: "m4a",  name: "M4A (.m4a)",   desc: "AAC High Fidelity" },
-                    { id: "wav",  name: "WAV (.wav)",   desc: "Lossless uncompressed" }
-                  ]
-
-                  Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 38
-                    radius: 6
-                    border.width: 1
-                    border.color: root.selectedAudioFormat === modelData.id ? Color.accent : Util.alpha(Color.foreground, 0.12)
-                    color: root.selectedAudioFormat === modelData.id ? Util.alpha(Color.accent, 0.15) : (afmtMouse.containsMouse ? Util.alpha(Color.foreground, 0.05) : "transparent")
-
-                    RowLayout {
-                      anchors.fill: parent
-                      anchors.margins: 8
-                      spacing: 4
-
+                Text { text: "Audio Codec:"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.foreground }
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: 8
+                  Repeater {
+                    model: [
+                      { id: "opus", name: "Opus (Voice)" },
+                      { id: "m4a", name: "AAC (.m4a)" },
+                      { id: "mp3", name: "MP3 (.mp3)" }
+                    ]
+                    Rectangle {
+                      Layout.fillWidth: true
+                      height: 36
+                      radius: 6
+                      color: root.selectedAudioFormat === modelData.id ? Util.alpha(Color.accent, 0.2) : Util.alpha(Color.foreground, 0.05)
+                      border.width: 1
+                      border.color: root.selectedAudioFormat === modelData.id ? Color.accent : "transparent"
                       Text {
-                        Layout.fillWidth: true
+                        anchors.centerIn: parent
                         text: modelData.name
                         font.family: "JetBrainsMono Nerd Font"
                         font.bold: root.selectedAudioFormat === modelData.id
                         font.pixelSize: 11
                         color: root.selectedAudioFormat === modelData.id ? Color.accent : Color.foreground
-                        elide: Text.ElideRight
                       }
-
-                      Text {
-                        visible: root.selectedAudioFormat === modelData.id
-                        text: "✓"
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.bold: true
-                        font.pixelSize: 11
-                        color: Color.accent
+                      MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.selectedAudioFormat = modelData.id
                       }
-                    }
-
-                    MouseArea {
-                      id: afmtMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.selectedAudioFormat = modelData.id
                     }
                   }
                 }
               }
             }
 
-            Item { Layout.preferredHeight: 4 }
+            Item { Layout.preferredHeight: 6 }
 
-            // Save Settings Button
+            // Save Button
             Rectangle {
               Layout.fillWidth: true
               Layout.preferredHeight: 40
               radius: 6
               color: Color.accent
-
               RowLayout {
                 anchors.centerIn: parent
                 spacing: 6
-                Text { text: "󰆓"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: Style.font.body; color: Color.pick("background", "#1e1e2e") }
+                Text { text: "󰆓"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.pick("background", "#1e1e2e") }
                 Text { text: "Save Settings"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: Style.font.body; color: Color.pick("background", "#1e1e2e") }
               }
-
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                  root.settingsObj.provider = root.selectedProvider
-                  root.settingsObj.model = root.selectedModel
                   root.settingsObj.groq_model = root.selectedGroqModel
-                  root.settingsObj.openai_model = root.selectedOpenAIModel
-                  root.settingsObj.local_model = root.selectedLocalModel
                   root.settingsObj.storage_path = storagePathInput.text.trim()
                   root.settingsObj.notes_format = root.selectedNotesFormat
                   root.settingsObj.audio_format = root.selectedAudioFormat
-                  root.setCurrentApiKey(apiKeyInput.text.trim())
+                  root.settingsObj.groq_api_key = apiKeyInput.text.trim()
 
                   var settingsJson = JSON.stringify(root.settingsObj)
                   actionProc.command = ["python3", root.enginePath, "save-settings", settingsJson]
                   actionProc.running = true
-                  var provTitle = root.selectedProvider === "gemini" ? "Google Gemini" : (root.selectedProvider === "groq" ? "Groq Cloud" : (root.selectedProvider === "local" ? "Local Whisper" : "OpenAI"))
-                  root.saveFeedbackText = "✓ Settings saved (" + provTitle + ")!"
+                  root.saveFeedbackText = "✓ Settings saved"
                   feedbackTimer.restart()
                 }
               }
@@ -2597,11 +2020,9 @@ BarWidget {
               text: root.saveFeedbackText
               font.family: "JetBrainsMono Nerd Font"
               font.bold: true
-              font.pixelSize: Style.font.small
+              font.pixelSize: Style.font.body
               color: Color.accent
             }
-
-            Item { Layout.preferredHeight: 8 }
           }
         }
       }

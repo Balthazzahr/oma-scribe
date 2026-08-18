@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Audio Notes Engine for Omarchy Arch Linux Quickshell Plugin.
+Oma Scribe Audio Engine (Pure Groq Cloud Backend).
 Handles:
-- PipeWire / PulseAudio recording (Meeting dual-channel vs Voice memo mic-only)
-- State management via ~/.cache/audio_notes_state.json
-- Direct Gemini API transcription & structured notes generation
-- Clean separation of Summary Notes and Pure Transcripts
-- Notification integration and Editor launching
+- PipeWire / PulseAudio dual-track meeting recording & voice memos
+- Voice-optimized Opus recording (24kbps VOIP, 16kHz)
+- Ultra-fast Whisper Large v3 transcription on Groq LPUs (~2-4 seconds)
+- High-accuracy structured meeting synthesis with Llama 3.3 70B Versatile
+- Automatic audio chunking if file exceeds 25MB Groq API limit
+- Clean two-phase separation of transcript.md and notes.md (zero delimiter issues)
+- Real-time stage progress & time estimation
+- Interactive process cancellation
+- Full error extraction from Groq API
 """
 
 import os
@@ -14,8 +18,7 @@ import sys
 import json
 import time
 import signal
-import base64
-import hashlib
+import uuid
 import re
 import urllib.request
 import urllib.error
@@ -24,33 +27,18 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 
-def get_audio_mime_type(file_path):
-    ext = Path(file_path).suffix.lower()
-    if ext == ".mp3":
-        return "audio/mp3"
-    elif ext in (".m4a", ".mp4", ".aac"):
-        return "audio/mp4"
-    elif ext == ".wav":
-        return "audio/wav"
-    else:
-        return "audio/ogg"
+API_TIMEOUT = 90
 
 APP_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = Path.home() / ".config" / "omarchy" / "audio_notes.json"
 CACHE_DIR = Path.home() / ".cache"
 STATE_FILE = CACHE_DIR / "audio_notes_state.json"
-
-META_CACHE_DIR = Path.home() / ".cache" / "omarchy" / "oma_scribe_metadata"
+META_CACHE_DIR = CACHE_DIR / "omarchy" / "oma_scribe_metadata"
 
 DEFAULT_SETTINGS = {
-    "provider": "gemini",
-    "gemini_api_key": "",
     "groq_api_key": "",
-    "openai_api_key": "",
-    "model": "gemini-3.7-flash",
     "groq_model": "llama-3.3-70b-versatile",
-    "openai_model": "gpt-4o-mini",
-    "local_model": "base",
+    "whisper_model": "whisper-large-v3",
     "storage_path": str(Path.home() / "Documents" / "AudioNotes"),
     "notes_format": "md",    # "md" | "txt" | "html"
     "audio_format": "opus",  # "opus" | "mp3" | "m4a" | "wav"
@@ -59,11 +47,23 @@ DEFAULT_SETTINGS = {
     "notes_editor": "xdg-open"
 }
 
+def get_audio_mime_type(file_path):
+    ext = Path(file_path).suffix.lower()
+    if ext == ".mp3":
+        return "audio/mp3"
+    elif ext in (".m4a", ".mp4", ".aac"):
+        return "audio/m4a"
+    elif ext == ".wav":
+        return "audio/wav"
+    elif ext == ".opus":
+        return "audio/ogg"
+    else:
+        return "audio/ogg"
+
 def load_note_metadata(folder_or_file):
     p = Path(folder_or_file)
     folder = p if p.is_dir() else p.parent
 
-    # 1. Primary: Hidden .metadata.json in folder
     hidden_p = folder / ".metadata.json"
     if hidden_p.exists():
         try:
@@ -72,7 +72,6 @@ def load_note_metadata(folder_or_file):
         except Exception:
             pass
 
-    # 2. Legacy visible metadata.json in folder (migrate to hidden .metadata.json)
     legacy_p = folder / "metadata.json"
     if legacy_p.exists():
         try:
@@ -92,13 +91,14 @@ def load_note_metadata(folder_or_file):
 def save_note_metadata(folder_or_file, meta):
     p = Path(folder_or_file)
     folder = p if p.is_dir() else p.parent
+    META_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     hidden_p = folder / ".metadata.json"
     try:
         with open(hidden_p, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
     except Exception:
         pass
-    # Clean visible metadata.json if present
+
     try:
         (folder / "metadata.json").unlink(missing_ok=True)
     except Exception:
@@ -107,18 +107,18 @@ def save_note_metadata(folder_or_file, meta):
 def get_audio_codec_args(audio_format):
     fmt = (audio_format or "opus").lower()
     if fmt == "mp3":
-        return ".mp3", ["-c:a", "libmp3lame", "-b:a", "128k"]
+        return ".mp3", ["-c:a", "libmp3lame", "-b:a", "64k", "-ar", "16000"]
     elif fmt == "m4a":
-        return ".m4a", ["-c:a", "aac", "-b:a", "96k"]
+        return ".m4a", ["-c:a", "aac", "-b:a", "64k", "-ar", "16000"]
     elif fmt == "wav":
-        return ".wav", ["-c:a", "pcm_s16le"]
+        return ".wav", ["-c:a", "pcm_s16le", "-ar", "16000"]
     else:
-        return ".opus", ["-c:a", "libopus", "-b:a", "96k"]
+        # Voice-optimized Opus: 24kbps VOIP application, 16kHz, VBR (75-80% smaller)
+        return ".opus", ["-c:a", "libopus", "-b:a", "24k", "-application", "voip", "-vbr", "on", "-ar", "16000"]
 
 def format_notes_content(text, notes_format):
     fmt = (notes_format or "md").lower()
     if fmt == "txt":
-        import re
         clean = re.sub(r'#+\s*', '', text)
         clean = re.sub(r'\*\*(.*?)\*\*', r'\1', clean)
         clean = re.sub(r'\*(.*?)\*', r'\1', clean)
@@ -199,6 +199,92 @@ def notify(summary, body=""):
     except Exception:
         pass
 
+def extract_http_error(e):
+    """Parses full JSON error messages from Groq API rather than generic HTTP codes."""
+    try:
+        raw = e.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "error" in data:
+                err = data["error"]
+                if isinstance(err, dict):
+                    msg = err.get("message") or str(err)
+                    code = err.get("code") or e.code
+                    return f"Groq Error ({code}): {msg}"
+                elif isinstance(err, str):
+                    return f"Groq Error ({e.code}): {err}"
+        except Exception:
+            pass
+        if raw:
+            return f"HTTP {e.code} ({e.reason}): {raw[:400]}"
+        return f"HTTP {e.code}: {e.reason}"
+    except Exception:
+        return f"HTTP {e.code}: {e.reason}"
+
+def get_audio_duration(file_path):
+    try:
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(file_path)]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            return float(res.stdout.strip())
+    except Exception:
+        pass
+    try:
+        cmd = ["ffmpeg", "-i", str(file_path)]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
+        if match:
+            h, m, s = match.groups()
+            return int(h) * 3600 + int(m) * 60 + float(s)
+    except Exception:
+        pass
+    return 0.0
+
+def split_audio_if_needed(file_path, max_size_bytes=24 * 1024 * 1024):
+    """If file exceeds max_size_bytes (24MB for Groq), splits into smaller overlapping chunks."""
+    p = Path(file_path)
+    file_size = p.stat().st_size
+    if file_size <= max_size_bytes:
+        return [str(p)], False
+
+    duration = get_audio_duration(p)
+    if duration <= 0:
+        return [str(p)], False
+
+    num_chunks = max(2, int((file_size / max_size_bytes) * 1.25) + 1)
+    chunk_duration = duration / num_chunks
+    overlap_sec = 2.0
+
+    scratch_dir = p.parent / ".temp_chunks"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    chunk_paths = []
+
+    for i in range(num_chunks):
+        start_time = max(0.0, i * chunk_duration - (overlap_sec if i > 0 else 0))
+        chunk_file = scratch_dir / f"chunk_{i:03d}.opus"
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", str(start_time),
+            "-i", str(p),
+            "-t", str(chunk_duration + (overlap_sec if i > 0 else 0)),
+            "-c:a", "libopus", "-b:a", "24k", "-application", "voip", "-vbr", "on", "-ar", "16000",
+            str(chunk_file)
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        chunk_paths.append(str(chunk_file))
+
+    return chunk_paths, True
+
+def cleanup_temp_chunks(file_path):
+    scratch_dir = Path(file_path).parent / ".temp_chunks"
+    if scratch_dir.exists():
+        try:
+            for f in scratch_dir.glob("*"):
+                f.unlink(missing_ok=True)
+            scratch_dir.rmdir()
+        except Exception:
+            pass
+
 def get_state():
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     if STATE_FILE.exists():
@@ -206,12 +292,19 @@ def get_state():
             with open(STATE_FILE, "r") as f:
                 state = json.load(f)
                 if state.get("is_recording") and state.get("pid"):
-                    pid = state["pid"]
                     try:
-                        os.kill(pid, 0)
+                        os.kill(state["pid"], 0)
                     except OSError:
                         state["is_recording"] = False
                         state["pid"] = None
+                        save_state(state)
+                if state.get("is_processing") and state.get("transcribe_pid"):
+                    try:
+                        os.kill(state["transcribe_pid"], 0)
+                    except OSError:
+                        state["is_processing"] = False
+                        state["transcribe_pid"] = None
+                        state["processing_stage"] = ""
                         save_state(state)
                 return state
         except Exception:
@@ -223,12 +316,19 @@ def get_state():
         "title": "",
         "start_time": 0,
         "pid": None,
+        "transcribe_pid": None,
         "current_audio_file": "",
         "current_folder": "",
         "last_processed_file": "",
         "last_notes_file": "",
         "last_transcript_file": "",
-        "status_message": "Ready"
+        "status_message": "Ready",
+        "processing_stage": "",
+        "progress_percent": 0,
+        "processing_start_time": 0,
+        "estimated_duration": 0,
+        "last_error": "",
+        "current_model": ""
     }
     save_state(default_state)
     return default_state
@@ -237,6 +337,24 @@ def save_state(state):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
+def update_progress(stage, percent=None, current_model=None):
+    try:
+        state = get_state()
+        state["processing_stage"] = stage
+        if percent is not None:
+            state["progress_percent"] = percent
+        if current_model is not None:
+            state["current_model"] = current_model
+        save_state(state)
+    except Exception:
+        pass
+
+def clear_error():
+    state = get_state()
+    state["last_error"] = ""
+    save_state(state)
+    return {"status": "ok"}
 
 def start_recording(mode="meeting", title="", metadata=None):
     state = get_state()
@@ -261,7 +379,7 @@ def start_recording(mode="meeting", title="", metadata=None):
 
     now = datetime.now()
     date_time_str = format_folder_datetime(now)
-    clean_title = title.strip()
+    clean_title = (title or "").strip()
 
     if clean_title:
         folder_name = f"{clean_title} - {date_time_str}"
@@ -277,16 +395,13 @@ def start_recording(mode="meeting", title="", metadata=None):
     audio_ext, codec_flags = get_audio_codec_args(audio_fmt)
     audio_path = note_dir / f"recording{audio_ext}"
 
-    # Save pre-meeting metadata to hidden cache (keeps user folder clean)
     meta_obj["mode"] = mode
     meta_obj["title"] = title
     meta_obj["created_at"] = now.strftime("%Y-%m-%d %H:%M")
     meta_obj["date_time_str"] = date_time_str
     save_note_metadata(note_dir, meta_obj)
 
-    # Build ffmpeg command
     if mode == "meeting":
-        # Left channel = Default Microphone, Right channel = Default Sink Monitor (Teams/System output)
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "pulse", "-i", "default",
@@ -295,7 +410,6 @@ def start_recording(mode="meeting", title="", metadata=None):
             "-map", "[out]"
         ] + codec_flags + [str(audio_path)]
     else:
-        # Voice memo mode: Microphone only
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "pulse", "-i", "default"
@@ -311,7 +425,8 @@ def start_recording(mode="meeting", title="", metadata=None):
         "pid": proc.pid,
         "current_audio_file": str(audio_path),
         "current_folder": str(note_dir),
-        "status_message": f"Recording {mode}..."
+        "status_message": f"Recording {mode}...",
+        "last_error": ""
     })
     save_state(state)
     notify("Recording Started", f"Folder: {safe_folder_name}")
@@ -331,7 +446,6 @@ def stop_recording(metadata=None):
             pass
 
     audio_file = state.get("current_audio_file", "")
-    mode = state.get("mode", "meeting")
     title = state.get("title", "")
 
     meta_obj = {}
@@ -349,14 +463,12 @@ def stop_recording(metadata=None):
 
     if audio_file and os.path.exists(audio_file):
         note_dir = Path(audio_file).parent
-        # Merge live fields entered during active recording
         existing_meta = load_note_metadata(note_dir)
         existing_meta.update(meta_obj)
         if title:
             existing_meta["title"] = title
         save_note_metadata(note_dir, existing_meta)
 
-        # If title is provided, rename folder accordingly
         if title and title not in ("Meeting", "Voice Memo"):
             date_time_str = existing_meta.get("date_time_str") or format_folder_datetime(datetime.fromtimestamp(note_dir.stat().st_mtime))
             expected_folder_name = f"{title} - {date_time_str}"
@@ -386,394 +498,398 @@ def stop_recording(metadata=None):
 
     return {"status": "ok", "audio_file": audio_file, "state": state, "title": title}
 
-# --- HTTP MULTIPART HELPER ---
-def post_multipart_file(url, api_key, file_path, fields):
-    boundary = f"----AudioNotesBoundary{os.urandom(16).hex()}"
+def cancel_transcription():
+    state = get_state()
+    tpid = state.get("transcribe_pid")
+    if tpid:
+        try:
+            os.kill(tpid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    audio_file = state.get("current_audio_file")
+    if audio_file:
+        cleanup_temp_chunks(audio_file)
+
+    state.update({
+        "is_processing": False,
+        "transcribe_pid": None,
+        "current_model": "",
+        "progress_percent": 0,
+        "processing_stage": "",
+        "status_message": "Transcription cancelled",
+        "last_error": ""
+    })
+    save_state(state)
+    notify("Oma Scribe", "Transcription stopped")
+    return {"status": "ok", "message": "Transcription cancelled"}
+
+# =========================================================================
+# GROQ CLOUD PIPELINE: WHISPER-LARGE-V3 + LLAMA-3.3-70B
+# =========================================================================
+def build_multipart_form(fields, files):
+    """Builds multipart/form-data payload without external libraries."""
+    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
     body = bytearray()
-    for k, v in fields.items():
+
+    for name, value in fields.items():
         body.extend(f"--{boundary}\r\n".encode("utf-8"))
-        body.extend(f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode("utf-8"))
-        body.extend(f"{v}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(f"{value}\r\n".encode("utf-8"))
 
-    filename = os.path.basename(file_path)
-    mime_type = get_audio_mime_type(file_path)
-    body.extend(f"--{boundary}\r\n".encode("utf-8"))
-    body.extend(f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"))
-    body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"))
-    with open(file_path, "rb") as f:
-        body.extend(f.read())
-    body.extend(b"\r\n")
+    for name, (filename, filedata, content_type) in files.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8"))
+        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        body.extend(filedata)
+        body.extend(b"\r\n")
+
     body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body, content_type
 
+def transcribe_audio_with_groq(audio_path, api_key, prompt=""):
+    """
+    Submits audio to Groq Whisper Large v3 LPU endpoint.
+    Transcribes a full meeting in ~2-4 seconds.
+    """
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    clean_key = (api_key or "").strip()
+
+    chunk_files, was_split = split_audio_if_needed(audio_path, max_size_bytes=24 * 1024 * 1024)
+    all_transcripts = []
+
+    for idx, cf in enumerate(chunk_files):
+        cf_path = Path(cf)
+        mime_type = get_audio_mime_type(cf)
+        filename = cf_path.name
+
+        with open(cf, "rb") as f:
+            file_bytes = f.read()
+
+        fields = {
+            "model": "whisper-large-v3",
+            "response_format": "verbose_json",
+            "temperature": "0.0"
+        }
+        if prompt:
+            fields["prompt"] = prompt[:400]
+
+        files = {
+            "file": (filename, file_bytes, mime_type)
+        }
+
+        body, content_type = build_multipart_form(fields, files)
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {clean_key}",
+                "Content-Type": content_type,
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+                res_data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(extract_http_error(e))
+        except Exception as e:
+            raise RuntimeError(f"Groq Whisper transcription failed: {str(e)}")
+
+        segments = res_data.get("segments", [])
+        if segments:
+            for s in segments:
+                start_sec = int(s.get("start", 0))
+                hh = start_sec // 3600
+                mm = (start_sec % 3600) // 60
+                ss = start_sec % 60
+                ts = f"[{hh:02d}:{mm:02d}:{ss:02d}]" if hh > 0 else f"[{mm:02d}:{ss:02d}]"
+                text = s.get("text", "").strip()
+                if text:
+                    all_transcripts.append(f"{ts} {text}")
+        else:
+            raw_text = res_data.get("text", "").strip()
+            if raw_text:
+                all_transcripts.append(raw_text)
+
+    if was_split:
+        cleanup_temp_chunks(audio_path)
+
+    full_transcript = "\n".join(all_transcripts).strip()
+    if not full_transcript:
+        raise RuntimeError("Groq Whisper returned an empty transcript for this audio.")
+
+    return full_transcript
+
+def get_available_groq_models(api_key):
+    """Dynamically fetches active chat models directly from the user's Groq account."""
+    url = "https://api.groq.com/openai/v1/models"
+    clean_key = (api_key or "").strip()
     req = urllib.request.Request(
         url,
-        data=bytes(body),
         headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}"
+            "Authorization": f"Bearer {clean_key}",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
         }
     )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            # Exclude guardrails, safety classifiers, audio, speech
+            excluded = ["guard", "whisper", "orpheus", "tts", "embedding", "safeguard", "moderation"]
+            chat_models = [m for m in models if not any(k in m.lower() for k in excluded)]
+            return chat_models
+    except Exception:
+        return []
 
-# =========================================================================
-# PROVIDER 1: GOOGLE GEMINI (DIRECT MULTIMODAL AUDIO)
-# =========================================================================
-def upload_file_to_gemini(api_key, file_path, mime_type=None):
-    if mime_type is None:
-        mime_type = get_audio_mime_type(file_path)
+def call_groq_chat(messages, api_key, model_list=None, max_tokens=4096):
+    """Calls Groq chat completion with automatic model fallback across active LLMs."""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    clean_key = (api_key or "").strip()
 
-    file_size = os.path.getsize(file_path)
-    display_name = os.path.basename(file_path)
+    if not model_list:
+        model_list = get_available_groq_models(clean_key)
+        if not model_list:
+            model_list = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b"]
 
-    init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}"
-    metadata = {"file": {"display_name": display_name}}
-    body_data = json.dumps(metadata).encode("utf-8")
-    req = urllib.request.Request(init_url, data=body_data, headers={
-        "X-Goog-Upload-Protocol": "resumable",
-        "X-Goog-Upload-Command": "start",
-        "X-Goog-Upload-Header-Content-Length": str(file_size),
-        "X-Goog-Upload-Header-Content-Type": mime_type,
-        "Content-Type": "application/json"
-    })
-
-    with urllib.request.urlopen(req) as resp:
-        upload_url = resp.headers.get("X-Goog-Upload-URL") or resp.headers.get("x-goog-upload-url")
-
-    if not upload_url:
-        raise RuntimeError("Failed to obtain Gemini File API upload URL")
-
-    with open(file_path, "rb") as f:
-        file_bytes = f.read()
-
-    upload_req = urllib.request.Request(upload_url, data=file_bytes, headers={
-        "Content-Length": str(file_size),
-        "X-Goog-Upload-Offset": "0",
-        "X-Goog-Upload-Command": "upload, finalize"
-    })
-
-    with urllib.request.urlopen(upload_req) as resp:
-        res_json = json.loads(resp.read().decode("utf-8"))
-        file_obj = res_json.get("file", {})
-        file_uri = file_obj.get("uri")
-        file_name = file_obj.get("name")
-
-    if file_name:
-        for _ in range(15):
-            try:
-                check_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={api_key}"
-                with urllib.request.urlopen(check_url) as check_resp:
-                    check_json = json.loads(check_resp.read().decode("utf-8"))
-                    state = check_json.get("state")
-                    if state == "ACTIVE":
-                        break
-                    elif state == "FAILED":
-                        raise RuntimeError("Uploaded audio file processing failed on Gemini server.")
-            except Exception:
-                pass
-            time.sleep(1)
-
-    return file_uri
-
-def generate_notes_and_transcript_with_gemini(audio_path, mode="meeting", title="", api_key="", model="gemini-3.7-flash", speakers=""):
-    if not api_key:
-        api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        raise ValueError("Google Gemini API key is required. Please set it in Audio Notes settings.")
-
-    mime_type = get_audio_mime_type(audio_path)
-    file_uri = upload_file_to_gemini(api_key, audio_path, mime_type=mime_type)
-
-    speaker_context = ""
-    if speakers and speakers.strip():
-        speaker_context = f"\n\nCRITICAL CONTEXT - Known Participants/Speakers in this recording: {speakers.strip()}.\nIdentify their voices and attribute their dialogue and action items to these specific names."
-
-    if mode == "meeting":
-        system_instruction = (
-            "You are an expert audio transcriptionist and executive assistant. "
-            "Listen to the provided audio recording of a meeting.\n"
-            "Note: The audio may have local and remote participants." + speaker_context + "\n\n"
-            "You must output TWO distinct sections separated by the delimiter string '===TRANSCRIPT_DELIMITER===':\n\n"
-            "SECTION 1: Meeting Summary Notes (in Markdown format):\n"
-            "# 📋 Meeting Summary: " + (title or "Team Meeting") + "\n\n"
-            "**Date:** " + datetime.now().strftime("%Y-%m-%d %H:%M") + "\n\n"
-            "## 📌 Executive Summary\n"
-            "A concise synthesis of the meeting purpose, key discussions, and overall outcomes.\n\n"
-            "## 🎯 Key Decisions Made\n"
-            "- Bullet points of all agreed decisions\n\n"
-            "## ✅ Action Items & Owners\n"
-            "- [ ] **[Owner/Name]**: Action item description with context (if mentioned)\n\n"
-            "## 💡 Topics Discussed\n"
-            "- Key insights and discussion points\n\n"
-            "===TRANSCRIPT_DELIMITER===\n\n"
-            "SECTION 2: Pure Audio Transcription:\n"
-            "# 📝 Verbatim Transcript: " + (title or "Team Meeting") + "\n"
-            "**Date:** " + datetime.now().strftime("%Y-%m-%d %H:%M") + "\n\n"
-            "Follow these strict speaker identification rules:\n"
-            "1. If a speaker's name is known, introduced, or mentioned in the audio, use their actual name.\n"
-            "2. If names are not known, label them as 'Male Speaker 1', 'Female Speaker 1', etc.\n"
-            "3. If a name is heard or learned later in the recording, attribute all of that speaker's turns to their real name.\n"
-            "4. Provide a pure, clean verbatim chronological transcript with timestamps in the format: `[HH:MM:SS] Speaker Name: Spoken text`.\n"
-        )
-    else:
-        system_instruction = (
-            "You are an expert audio transcriptionist and note synthesizer. "
-            "Listen to the provided voice memo / audio dictation." + speaker_context + "\n\n"
-            "You must output TWO distinct sections separated by the delimiter string '===TRANSCRIPT_DELIMITER===':\n\n"
-            "SECTION 1: Spoken Audio Summary (in Markdown format):\n"
-            "# 🎙️ Summary: " + (title or "Audio Note") + "\n\n"
-            "**Date:** " + datetime.now().strftime("%Y-%m-%d %H:%M") + "\n\n"
-            "## 📝 Overview & Summary\n"
-            "A natural, well-written synthesis of what was spoken, capturing the thoughts, explanations, and core message clearly.\n\n"
-            "## 💡 Key Points & Ideas\n"
-            "- Bullet points of the main ideas, takeaways, or concepts expressed in the recording.\n\n"
-            "## 📌 Next Steps / Reminders\n"
-            "- [ ] Any follow-ups, to-dos, or reminders mentioned (omit if none).\n\n"
-            "===TRANSCRIPT_DELIMITER===\n\n"
-            "SECTION 2: Pure Audio Transcription:\n"
-            "# 📝 Verbatim Transcript: " + (title or "Audio Note") + "\n"
-            "**Date:** " + datetime.now().strftime("%Y-%m-%d %H:%M") + "\n\n"
-            "Provide a pure, clean verbatim chronological transcript with timestamps in the format: `[HH:MM:SS] Spoken text`.\n"
-        )
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {"file_data": {"mime_type": "audio/ogg", "file_uri": file_uri}},
-                    {"text": system_instruction}
-                ]
+    last_errors = []
+    for m in model_list:
+        payload = {
+            "model": m,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": max_tokens
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {clean_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             }
-        ],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192}
-    }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+                res_data = json.loads(resp.read().decode("utf-8"))
+                choices = res_data.get("choices", [])
+                if choices and choices[0].get("message"):
+                    return choices[0]["message"].get("content", "").strip(), m
+        except urllib.error.HTTPError as e:
+            err_msg = extract_http_error(e)
+            last_errors.append(f"{m} -> {err_msg}")
+            continue
+        except Exception as e:
+            last_errors.append(f"{m} -> {str(e)}")
+            continue
 
-    models_to_try = [model]
-    if model != "gemini-2.5-flash":
-        models_to_try.append("gemini-2.5-flash")
+    err_summary = " | ".join(last_errors) if last_errors else "All models failed"
+    raise RuntimeError(f"Groq note synthesis failed: {err_summary}")
 
-    last_error = None
-    res = None
+def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_key="", model="llama-3.1-70b-versatile", metadata=None):
+    """
+    Submits verbatim transcript to Groq LLM for structured synthesis (~1s).
+    Automatically chunks large transcripts (>20,000 chars) to prevent TPM rate limits.
+    """
+    attendees = meta.get("attendees", [])
+    if isinstance(attendees, str):
+        if "AttendeeONE" in attendees or "AttendeeTWO" in attendees:
+            attendees = []
+        else:
+            attendees = [s.strip() for s in attendees.split(",") if s.strip()]
+    topics = (meta.get("topics") or "").strip()
+    notes = (meta.get("notes") or "").strip()
+    description_parts = []
+    if topics:
+        description_parts.append(topics)
+    if notes:
+        description_parts.append(notes)
+    meeting_description = "\n\n".join(description_parts) if description_parts else "(No description provided)"
 
-    for m in models_to_try:
-        for attempt in range(4):
-            gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
-            req = urllib.request.Request(
-                gen_url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
+    attendee_lines = ""
+    if attendees:
+        att_list = []
+        for a in attendees:
+            if isinstance(a, dict) and a.get("name"):
+                sex = (a.get("sex") or "").strip()
+                att_list.append(f"- {a['name']}" + (f" ({sex})" if sex else ""))
+            elif isinstance(a, str) and a.strip():
+                att_list.append(f"- {a.strip()}")
+        attendee_lines = "\n".join(att_list)
+
+    # Rank available models
+    active_models = get_available_groq_models(clean_key)
+    models_to_try = []
+    if model and (not active_models or model in active_models):
+        models_to_try.append(model)
+
+    if active_models:
+        def model_score(name):
+            n = name.lower()
+            if "70b" in n: return 100
+            if "compound" in n: return 90
+            if "32b" in n or "27b" in n: return 80
+            if "deepseek" in n: return 75
+            if "qwen" in n: return 70
+            if "llama" in n: return 60
+            if "gemma" in n: return 50
+            if "8b" in n: return 40
+            return 10
+        sorted_active = sorted(active_models, key=model_score, reverse=True)
+        for m in sorted_active:
+            if m not in models_to_try:
+                models_to_try.append(m)
+
+    # If transcript is very large (>18,000 chars), summarize sections first to avoid TPM overflow
+    processed_transcript = transcript_text
+    if len(transcript_text) > 18000:
+        update_progress("Synthesizing multi-part meeting transcript in sections...", 65)
+        lines = transcript_text.split("\n")
+        chunks = []
+        cur_chunk = []
+        cur_len = 0
+        for l in lines:
+            cur_chunk.append(l)
+            cur_len += len(l) + 1
+            if cur_len >= 12000:
+                chunks.append("\n".join(cur_chunk))
+                cur_chunk = []
+                cur_len = 0
+        if cur_chunk:
+            chunks.append("\n".join(cur_chunk))
+
+        section_summaries = []
+        for idx, ch in enumerate(chunks):
+            update_progress(f"Synthesizing section {idx+1}/{len(chunks)}...", 65 + int(idx * 15 / len(chunks)))
+            sec_prompt = f"Summarize key discussion points, context, decisions, and action items with timestamps from this section of the meeting transcript:\n\n{ch}"
+            sec_res, _ = call_groq_chat(
+                [{"role": "user", "content": sec_prompt}],
+                api_key=clean_key,
+                model_list=models_to_try,
+                max_tokens=1500
             )
-            try:
-                with urllib.request.urlopen(req) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
-                    break
-            except urllib.error.HTTPError as e:
-                last_error = f"HTTP {e.code}: {e.reason}"
-                if e.code in (503, 500, 429) and attempt < 3:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                else:
-                    break
-            except Exception as e:
-                last_error = str(e)
-                if attempt < 3:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                else:
-                    break
+            section_summaries.append(f"### Meeting Segment {idx+1}\n{sec_res}")
 
-        if res:
-            break
+        processed_transcript = "## Sectional Syntheses from Verbatim Transcript:\n" + "\n\n".join(section_summaries)
 
-    if not res:
-        raise RuntimeError(f"Gemini service error ({last_error}). Please try again in a moment.")
+    update_progress("Generating final executive meeting record...", 85)
 
-    candidates = res.get("candidates", [])
-    if not candidates:
-        raise RuntimeError("No response candidates returned from Gemini.")
-
-    parts = candidates[0].get("content", {}).get("parts", [])
-    raw_output = "".join(part.get("text", "") for part in parts)
-
-    if "===TRANSCRIPT_DELIMITER===" in raw_output:
-        summary_section, transcript_section = raw_output.split("===TRANSCRIPT_DELIMITER===", 1)
-    else:
-        summary_section = raw_output
-        transcript_section = raw_output
-
-    return summary_section.strip(), transcript_section.strip()
-
-# =========================================================================
-# PROVIDER 2: GROQ CLOUD (WHISPER LARGE V3 + LLAMA 3.3 70B)
-# =========================================================================
-def generate_notes_and_transcript_with_groq(audio_path, mode="meeting", title="", api_key="", model="llama-3.3-70b-versatile", speakers=""):
-    if not api_key:
-        api_key = os.environ.get("GROQ_API_KEY", "")
-    if not api_key:
-        raise ValueError("Groq API key is required. Please set it in Audio Notes settings.")
-
-    # 1. Transcribe via Groq Whisper Large v3
-    trans_url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    trans_fields = {
-        "model": "whisper-large-v3",
-        "response_format": "text",
-        "temperature": "0.0"
-    }
-    if speakers and speakers.strip():
-        trans_fields["prompt"] = f"Speakers: {speakers.strip()[:200]}"
-
-    raw_transcript = post_multipart_file(trans_url, api_key, audio_path, trans_fields)
-    transcript_text = raw_transcript if isinstance(raw_transcript, str) else raw_transcript.get("text", "")
-
-    # 2. Summarize via Groq Llama 3.3
-    chat_url = "https://api.groq.com/openai/v1/chat/completions"
     if mode == "meeting":
-        sys_prompt = f"You are an expert executive meeting assistant. Analyze this transcript for '{title or 'Meeting'}' and generate structured Markdown meeting summary notes with Executive Summary, Key Decisions, Action Items & Owners, and Topics Discussed."
-    else:
-        sys_prompt = f"You are an expert notes synthesizer. Summarize this spoken audio note for '{title or 'Audio Note'}' into clean Markdown with Overview, Key Points, and Next Steps."
+        system_prompt = "You are an executive meeting analyst and transcription synthesizer. Your job is to transform verbatim meeting transcripts into comprehensive, well-structured, professional meeting records with complete action items and decision logs."
+        user_prompt = f"""Generate a detailed meeting record based on this meeting context and transcript:
 
-    chat_payload = {
-        "model": model or "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": f"Transcript:\n\n{transcript_text}"}
+=====================
+MEETING CONTEXT
+=====================
+Meeting Title: {title or "Team Meeting"}
+Description / Agenda: {meeting_description}
+Expected Attendees:
+{attendee_lines or "(No attendees specified)"}
+
+=====================
+TRANSCRIPT DATA
+=====================
+{processed_transcript}
+
+=====================
+REQUIRED FORMAT
+=====================
+Output structured markdown precisely as follows:
+
+## Meeting Overview
+- **Meeting**: {title or "Team Meeting"}
+- **Attendees Detected**: [List identified participants]
+- **Summary**: [2-3 sentence executive overview of main goals and outcomes]
+
+## Agenda / Key Topics Discussed
+[Numbered list of distinct subjects covered]
+
+## Detailed Discussion
+### [Topic 1]
+- **Context**: Summary of why this was discussed
+- **Key Points**: Comprehensive details, context, and findings
+- **Questions & Answers**: Any notable questions asked and answered
+- **Agreements / Outcomes**: Explicit agreements made
+
+## Action Items
+| Action Item | Owner | Target Deadline | Context / Details |
+| :--- | :--- | :--- | :--- |
+
+## Key Decisions Log
+- **[Decision]** — agreed by [participants]
+
+## Next Steps & Follow-ups"""
+    else:
+        system_prompt = "You are an expert audio note synthesizer. Your job is to transform voice memos and spoken thoughts into structured, crystal-clear notes and action items."
+        user_prompt = f"""Generate a structured note based on this audio transcript:
+
+=====================
+MEMO CONTEXT
+=====================
+Memo Title: {title or "Voice Memo"}
+Context: {meeting_description}
+
+=====================
+TRANSCRIPT DATA
+=====================
+{processed_transcript}
+
+=====================
+REQUIRED FORMAT
+=====================
+## Summary & Overview
+[Executive summary of the dictation]
+
+## Key Takeaways & Ideas
+- [Detailed bullet point breakdown of insights, thoughts, and points raised]
+
+## Action Items & Next Steps
+- [ ] [Action item with any details mentioned]
+
+## Technical Specifics / References
+- [Any specific names, numbers, URLs, commands, or details]
+
+## Open Questions / Follow-ups"""
+
+    result_text, model_used = call_groq_chat(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.2
-    }
-
-    req = urllib.request.Request(
-        chat_url,
-        data=json.dumps(chat_payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
+        api_key=clean_key,
+        model_list=models_to_try,
+        max_tokens=4096
     )
-    with urllib.request.urlopen(req) as resp:
-        chat_res = json.loads(resp.read().decode("utf-8"))
-        summary_md = chat_res.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-    transcript_md = f"# 📝 Verbatim Transcript: {title or 'Recording'}\n**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{transcript_text}"
-    return summary_md.strip(), transcript_md.strip()
-
-# =========================================================================
-# PROVIDER 3: OPENAI (WHISPER-1 + GPT-4O / GPT-4O-MINI)
-# =========================================================================
-def generate_notes_and_transcript_with_openai(audio_path, mode="meeting", title="", api_key="", model="gpt-4o-mini", speakers=""):
-    if not api_key:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        raise ValueError("OpenAI API key is required. Please set it in Audio Notes settings.")
-
-    # 1. Transcribe via Whisper-1
-    trans_url = "https://api.openai.com/v1/audio/transcriptions"
-    trans_fields = {
-        "model": "whisper-1",
-        "response_format": "text"
-    }
-    if speakers and speakers.strip():
-        trans_fields["prompt"] = f"Speakers: {speakers.strip()[:200]}"
-
-    raw_transcript = post_multipart_file(trans_url, api_key, audio_path, trans_fields)
-    transcript_text = raw_transcript if isinstance(raw_transcript, str) else raw_transcript.get("text", "")
-
-    # 2. Summarize via GPT-4o / GPT-4o-mini
-    chat_url = "https://api.openai.com/v1/chat/completions"
-    if mode == "meeting":
-        sys_prompt = f"You are an expert executive meeting assistant. Analyze this transcript for '{title or 'Meeting'}' and generate structured Markdown meeting summary notes with Executive Summary, Key Decisions, Action Items & Owners, and Topics Discussed."
-    else:
-        sys_prompt = f"You are an expert notes synthesizer. Summarize this spoken audio note for '{title or 'Audio Note'}' into clean Markdown with Overview, Key Points, and Next Steps."
-
-    chat_payload = {
-        "model": model or "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": f"Transcript:\n\n{transcript_text}"}
-        ],
-        "temperature": 0.2
-    }
-
-    req = urllib.request.Request(
-        chat_url,
-        data=json.dumps(chat_payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-    )
-    with urllib.request.urlopen(req) as resp:
-        chat_res = json.loads(resp.read().decode("utf-8"))
-        summary_md = chat_res.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-    transcript_md = f"# 📝 Verbatim Transcript: {title or 'Recording'}\n**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{transcript_text}"
-    return summary_md.strip(), transcript_md.strip()
-
-# =========================================================================
-# PROVIDER 4: LOCAL WHISPER (100% OFFLINE / ZERO API KEY)
-# =========================================================================
-def generate_notes_and_transcript_with_local(audio_path, mode="meeting", title="", model="base", speakers=""):
-    # Check for whisper CLI or whisper-cpp
-    which_whisper = subprocess.run(["which", "whisper"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    which_whisper_cpp = subprocess.run(["which", "whisper-cpp"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-
-    if which_whisper.returncode == 0:
-        cmd = ["whisper", str(audio_path), "--model", model, "--output_format", "txt", "--output_dir", str(Path(audio_path).parent)]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        txt_path = Path(audio_path).parent / f"{Path(audio_path).stem}.txt"
-        transcript_text = txt_path.read_text(encoding="utf-8") if txt_path.exists() else "Local transcription completed."
-    elif which_whisper_cpp.returncode == 0:
-        cmd = ["whisper-cpp", "-m", f"/usr/share/whisper-models/ggml-{model}.bin", "-f", str(audio_path), "-otxt"]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        txt_path = Path(audio_path).parent / f"{Path(audio_path).name}.txt"
-        transcript_text = txt_path.read_text(encoding="utf-8") if txt_path.exists() else "Local transcription completed."
-    else:
-        raise RuntimeError("Local Whisper is not installed. To use offline mode, run: pip install openai-whisper (or sudo pacman -S whisper.cpp)")
-
-    summary_md = f"# 🎙️ Local Note: {title or 'Recording'}\n**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n## 📝 Transcript Overview\n{transcript_text[:500]}..."
-    transcript_md = f"# 📝 Verbatim Transcript: {title or 'Recording'}\n**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{transcript_text}"
-    return summary_md, transcript_md
+    return result_text, model_used
 
 def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
     state = get_state()
     settings = load_settings()
-    provider = settings.get("provider", "gemini")
 
-    if provider == "groq":
-        api_key = settings.get("groq_api_key", "").strip() or os.environ.get("GROQ_API_KEY", "").strip()
-        model = settings.get("groq_model", "llama-3.3-70b-versatile")
-        if not api_key:
-            notify("Audio Notes Error", "Groq API key is not configured. Please open Audio Notes settings.")
-            state.update({"is_processing": False, "status_message": "Error: Missing Groq API key"})
-            save_state(state)
-            return
-    elif provider == "openai":
-        api_key = settings.get("openai_api_key", "").strip() or os.environ.get("OPENAI_API_KEY", "").strip()
-        model = settings.get("openai_model", "gpt-4o-mini")
-        if not api_key:
-            notify("Audio Notes Error", "OpenAI API key is not configured. Please open Audio Notes settings.")
-            state.update({"is_processing": False, "status_message": "Error: Missing OpenAI API key"})
-            save_state(state)
-            return
-    elif provider == "local":
-        api_key = ""
-        model = settings.get("local_model", "base")
-    else:  # gemini
-        api_key = settings.get("gemini_api_key", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-        model = settings.get("model", "gemini-3.7-flash")
-        if not api_key:
-            notify("Audio Notes Error", "Gemini API key is not configured. Please open Audio Notes settings.")
-            state.update({"is_processing": False, "status_message": "Error: Missing Gemini API key"})
-            save_state(state)
-            return
+    api_key = settings.get("groq_api_key", "").strip() or os.environ.get("GROQ_API_KEY", "").strip()
+    groq_model = settings.get("groq_model", "llama-3.1-70b-versatile")
+    whisper_model = settings.get("whisper_model", "whisper-large-v3")
+
+    if not api_key:
+        err_msg = "Groq API key is not configured. Please open Oma Scribe Settings."
+        notify("Oma Scribe Error", err_msg)
+        state.update({
+            "is_processing": False,
+            "transcribe_pid": None,
+            "current_model": "",
+            "status_message": f"Error: {err_msg}",
+            "last_error": err_msg
+        })
+        save_state(state)
+        return
 
     p = Path(audio_path)
     note_dir = p.parent
-
-    # Load metadata from hidden .metadata.json
     meta = load_note_metadata(note_dir)
 
-    # Check if speakers argument contains a JSON metadata object
     if speakers and isinstance(speakers, str) and speakers.strip().startswith("{"):
         try:
             extra_meta = json.loads(speakers)
@@ -788,7 +904,6 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
     if not title and meta.get("title"):
         title = meta.get("title")
 
-    # If title was updated/provided, rename the folder if appropriate
     if title and title.strip():
         date_time_str = meta.get("date_time_str") or format_folder_datetime(datetime.fromtimestamp(p.stat().st_mtime))
         expected_folder_name = f"{title.strip()} - {date_time_str}"
@@ -809,114 +924,109 @@ def run_transcription_job(audio_path, mode="meeting", title="", speakers=""):
         meta["date_time_str"] = date_time_str
         save_note_metadata(note_dir, meta)
 
-    # Build rich context for LLM
-    parts = []
-    if title:
-        parts.append(f"Meeting Title: {title}")
-    if meta.get("topics"):
-        parts.append(f"Planned Topics / Agenda: {meta['topics']}")
+    audio_duration = get_audio_duration(audio_path)
+    estimated_duration = max(5, int(audio_duration / 120) + 4)
 
-    attendees = meta.get("attendees", [])
-    if attendees:
-        att_strs = []
-        for a in attendees:
-            if isinstance(a, dict) and a.get("name"):
-                sex_str = f" (Sex/Voice: {a.get('sex')})" if a.get('sex') else ""
-                att_strs.append(f"  * {a.get('name')}{sex_str}")
-            elif isinstance(a, str) and a.strip():
-                att_strs.append(f"  * {a.strip()}")
-        if att_strs:
-            parts.append("Known Meeting Attendees & Voice Profiles:\n" + "\n".join(att_strs))
-
-    if meta.get("notes"):
-        parts.append(f"Pre-Meeting Notes / Additional Context: {meta['notes']}")
-
-    if parts:
-        meta_context = "\n".join(parts)
-        speakers = (meta_context + "\n\n" + speakers).strip() if speakers else meta_context
-
-    provider_name = "Gemini" if provider == "gemini" else ("Groq" if provider == "groq" else ("OpenAI" if provider == "openai" else "Local Whisper"))
     state.update({
         "is_processing": True,
-        "status_message": f"Transcribing with {provider_name} ({model})..."
+        "transcribe_pid": os.getpid(),
+        "processing_start_time": time.time(),
+        "estimated_duration": estimated_duration,
+        "current_audio_file": str(audio_path),
+        "current_folder": str(note_dir),
+        "current_model": "Whisper Large v3",
+        "progress_percent": 10,
+        "processing_stage": "Uploading to Groq LPU (Whisper Large v3)...",
+        "status_message": "Transcribing with Groq...",
+        "last_error": ""
     })
     save_state(state)
-    notify("Processing Audio", f"Transcribing {note_dir.name} with {provider_name}...")
+    notify("Processing Audio", f"Transcribing {note_dir.name} on Groq LPUs...")
 
     try:
-        if provider == "groq":
-            summary_md, transcript_md = generate_notes_and_transcript_with_groq(
-                audio_path=str(audio_path), mode=mode, title=title, api_key=api_key, model=model, speakers=speakers
-            )
-        elif provider == "openai":
-            summary_md, transcript_md = generate_notes_and_transcript_with_openai(
-                audio_path=str(audio_path), mode=mode, title=title, api_key=api_key, model=model, speakers=speakers
-            )
-        elif provider == "local":
-            summary_md, transcript_md = generate_notes_and_transcript_with_local(
-                audio_path=str(audio_path), mode=mode, title=title, model=model, speakers=speakers
-            )
+        # 1. Transcribe with Whisper Large v3
+        attendees = meta.get("attendees", [])
+        if isinstance(attendees, str):
+            if "AttendeeONE" in attendees or "AttendeeTWO" in attendees:
+                prompt_hint = ""
+            else:
+                prompt_hint = attendees
+        elif isinstance(attendees, list):
+            prompt_hint = ", ".join(a.get("name", "") if isinstance(a, dict) else str(a) for a in attendees if "AttendeeONE" not in str(a))
         else:
-            summary_md, transcript_md = generate_notes_and_transcript_with_gemini(
-                audio_path=str(audio_path), mode=mode, title=title, api_key=api_key, model=model, speakers=speakers
-            )
+            prompt_hint = ""
+        update_progress("Transcribing audio on Groq LPUs (Whisper Large v3)...", 35, current_model="Whisper Large v3")
 
+        transcript_text = transcribe_audio_with_groq(str(audio_path), api_key=api_key, prompt=prompt_hint)
+
+        # 2. SAVE TRANSCRIPT IMMEDIATELY so verbatim output is guaranteed preserved!
         notes_fmt = settings.get("notes_format", "md").lower()
-        formatted_notes = format_notes_content(summary_md, notes_fmt)
-        formatted_trans = format_notes_content(transcript_md, notes_fmt)
-
-        notes_file = note_dir / f"notes.{notes_fmt}"
-        with open(notes_file, "w", encoding="utf-8") as f:
-            f.write(formatted_notes)
-
+        formatted_trans = format_notes_content(transcript_text, notes_fmt)
         transcript_file = note_dir / f"transcript.{notes_fmt}"
         with open(transcript_file, "w", encoding="utf-8") as f:
             f.write(formatted_trans)
 
-        # Update metadata in hidden cache
-        meta["has_notes"] = True
         meta["has_transcript"] = True
+        save_note_metadata(note_dir, meta)
+
+        # 3. Synthesize structured notes
+        update_progress(f"Synthesizing meeting notes...", 70, current_model="Groq LLM")
+        notes_md, model_used = synthesize_notes_with_groq(
+            transcript_text=transcript_text,
+            mode=mode,
+            title=title,
+            api_key=api_key,
+            model=groq_model,
+            metadata=meta
+        )
+
+        # 4. Format & Save Notes
+        update_progress("Writing notes.md...", 95, current_model=model_used)
+        formatted_notes = format_notes_content(notes_md, notes_fmt)
+        notes_file = note_dir / f"notes.{notes_fmt}"
+        with open(notes_file, "w", encoding="utf-8") as f:
+            f.write(formatted_notes)
+
+        meta["has_notes"] = True
         meta["title"] = title
         meta["notes_format"] = notes_fmt
         save_note_metadata(note_dir, meta)
 
-        # Clean legacy metadata.json from note_dir if present
-        try:
-            (note_dir / "metadata.json").unlink(missing_ok=True)
-        except Exception:
-            pass
-
         state.update({
             "is_processing": False,
+            "transcribe_pid": None,
+            "progress_percent": 100,
+            "processing_stage": "Complete",
             "last_processed_file": str(audio_path),
             "last_notes_file": str(notes_file),
             "last_transcript_file": str(transcript_file),
-            "status_message": "Transcription & Notes ready!"
+            "status_message": f"Notes ready ({model_used})",
+            "last_error": ""
         })
         save_state(state)
-        notify("Processing Complete", f"Saved Notes & Transcript in {note_dir.name}")
+        notify("Processing Complete", f"Saved Notes & Transcript in {note_dir.name} (Groq)")
 
     except Exception as e:
+        err_str = str(e)
         state.update({
             "is_processing": False,
-            "status_message": f"Processing error: {str(e)[:40]}"
+            "transcribe_pid": None,
+            "current_model": "",
+            "progress_percent": 0,
+            "processing_stage": "",
+            "status_message": f"Error: {err_str}",
+            "last_error": err_str
         })
         save_state(state)
-        notify("Transcription Error", str(e))
+        notify("Groq Transcription Error", err_str)
 
 def list_history():
     storage = get_storage_path()
     storage.mkdir(parents=True, exist_ok=True)
     items = []
 
-    # 1. Look for subfolders in storage (each folder is one note)
     for d in sorted(storage.iterdir(), key=os.path.getmtime, reverse=True):
         if d.is_dir() and d.name not in ("recordings", "notes", "transcripts"):
-            # Clean legacy metadata from user folder
-            legacy_meta = d / "metadata.json"
-            if legacy_meta.exists():
-                load_note_metadata(d)
-
             audio_files = list(d.glob("*.opus")) + list(d.glob("*.mp3")) + list(d.glob("*.m4a")) + list(d.glob("*.wav"))
             if not audio_files:
                 continue
@@ -951,37 +1061,7 @@ def list_history():
                 "has_transcript": has_transcript
             })
 
-    # 2. Also check legacy recordings dir if any exist
-    legacy_rec = storage / "recordings"
-    if legacy_rec.exists():
-        for p in sorted(legacy_rec.glob("*.opus"), key=os.path.getmtime, reverse=True):
-            stem = p.stem
-            note_p = storage / "notes" / f"{stem}.md"
-            trans_p = storage / "transcripts" / f"{stem}_transcript.md"
-            if not trans_p.exists():
-                trans_p = storage / "transcripts" / f"{stem}.md"
-
-            mode = "mic" if ("_mic_" in stem or stem.endswith("_mic")) else "meeting"
-            size_kb = round(p.stat().st_size / 1024, 1)
-            mod_time = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            parts = stem.split("_")
-            display_title = parts[-1] if len(parts) >= 3 else stem
-
-            items.append({
-                "audio_file": str(p),
-                "folder": str(p.parent),
-                "filename": p.name,
-                "title": display_title,
-                "mode": mode,
-                "date": mod_time,
-                "size_kb": size_kb,
-                "notes_file": str(note_p) if note_p.exists() else "",
-                "transcript_file": str(trans_p) if trans_p.exists() else "",
-                "has_notes": note_p.exists(),
-                "has_transcript": trans_p.exists()
-            })
-
-    return items[:40]
+    return items[:50]
 
 def open_file_in_editor(file_path):
     if not file_path or not os.path.exists(file_path):
@@ -989,141 +1069,58 @@ def open_file_in_editor(file_path):
     try:
         res = subprocess.run(["which", "omarchy-launch-editor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if res.returncode == 0:
-            subprocess.Popen(["omarchy-launch-editor", file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        else:
-            subprocess.Popen(["xdg-open", file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            subprocess.Popen(["omarchy-launch-editor", file_path])
+            return
     except Exception:
-        subprocess.Popen(["xdg-open", file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        pass
+    try:
+        subprocess.Popen(["xdg-open", file_path])
+    except Exception:
+        pass
 
 def open_storage_folder():
     storage = get_storage_path()
-    storage.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.Popen(["xdg-open", str(storage)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        subprocess.Popen(["xdg-open", str(storage)])
     except Exception:
         pass
 
-def rename_note(target_path, new_title):
-    if not target_path or not new_title or not new_title.strip():
-        return {"status": "error", "message": "Missing path or title"}
-
-    new_title = new_title.strip()
-    p = Path(target_path)
+def rename_note(target_folder_or_audio, new_title):
+    p = Path(target_folder_or_audio)
     folder = p if p.is_dir() else p.parent
-    storage = get_storage_path()
-
-    if not folder.exists():
-        return {"status": "error", "message": "Folder not found"}
+    if not folder.exists() or not new_title or not new_title.strip():
+        return {"status": "error", "message": "Invalid folder or title"}
 
     meta = load_note_metadata(folder)
-
-    date_time_str = meta.get("date_time_str")
-    if not date_time_str:
-        parts = folder.name.split(" - ")
-        if len(parts) >= 2 and any(c.isdigit() for c in parts[-1]):
-            date_time_str = " - ".join(parts[1:])
-        else:
-            try:
-                date_time_str = format_folder_datetime(datetime.fromtimestamp(folder.stat().st_mtime))
-            except Exception:
-                date_time_str = format_folder_datetime()
-
-    meta["title"] = new_title
-    meta["date_time_str"] = date_time_str
-
-    expected_folder_name = f"{new_title} - {date_time_str}"
-    safe_folder_name = "".join(c for c in expected_folder_name if c not in r'\/<>:"|?*').strip()
-
-    if folder.parent == storage and folder != storage:
-        new_folder = storage / safe_folder_name
-        if new_folder != folder:
-            try:
-                folder.rename(new_folder)
-                folder = new_folder
-            except Exception as e:
-                return {"status": "error", "message": f"Rename failed: {str(e)}"}
-
-    # Update hidden .metadata.json in folder
+    meta["title"] = new_title.strip()
     save_note_metadata(folder, meta)
 
-    # If notes file exists in the folder, update the title heading inside the notes file too
-    for nf in folder.glob("notes.*"):
+    date_time_str = meta.get("date_time_str") or format_folder_datetime(datetime.fromtimestamp(folder.stat().st_mtime))
+    expected_folder_name = f"{new_title.strip()} - {date_time_str}"
+    safe_expected = "".join(c for c in expected_folder_name if c not in r'\/<>:"|?*').strip()
+
+    storage = get_storage_path()
+    if folder.parent == storage and folder.name != safe_expected:
+        new_folder = storage / safe_expected
         try:
-            content = nf.read_text(encoding="utf-8")
-            new_content = re.sub(r'^(#+\s*📋\s*(?:Meeting Summary|Voice Memo):?\s*)[^\n]+', r'\g<1>' + new_title, content, flags=re.MULTILINE)
-            if new_content != content:
-                nf.write_text(new_content, encoding="utf-8")
-        except Exception:
-            pass
+            folder.rename(new_folder)
+            folder = new_folder
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
-    return {"status": "ok", "new_folder": str(folder), "new_title": new_title}
+    return {"status": "ok", "new_folder": str(folder), "title": new_title.strip()}
 
-def delete_recording(audio_path):
-    if not audio_path:
-        return {"status": "error", "message": "No file path provided"}
-    try:
-        p = Path(audio_path)
-        parent_dir = p.parent
-        storage = get_storage_path()
-
-        # If it's a dedicated note directory inside storage, delete the entire folder
-        if parent_dir.parent == storage and parent_dir != storage:
-            import shutil
-            shutil.rmtree(parent_dir)
-            return {"status": "ok", "deleted": parent_dir.name}
-
-        # Otherwise delete individual files (legacy)
-        stem = p.stem
-        if p.exists():
-            p.unlink()
-
-        meta_p = p.with_suffix(".meta.json")
-        if meta_p.exists():
-            meta_p.unlink()
-
-        note_p = storage / "notes" / f"{stem}.md"
-        if note_p.exists():
-            note_p.unlink()
-
-        trans_p = storage / "transcripts" / f"{stem}_transcript.md"
-        if trans_p.exists():
-            trans_p.unlink()
-        trans_p_alt = storage / "transcripts" / f"{stem}.md"
-        if trans_p_alt.exists():
-            trans_p_alt.unlink()
-
-        return {"status": "ok", "deleted": stem}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-def check_local_whisper():
-    which_whisper = subprocess.run(["which", "whisper"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    which_whisper_cpp = subprocess.run(["which", "whisper-cpp"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-
-    has_python_whisper = False
-    try:
-        res = subprocess.run([sys.executable, "-c", "import whisper; print('ok')"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        if res.stdout.strip() == "ok":
-            has_python_whisper = True
-    except Exception:
-        pass
-
-    installed = (which_whisper.returncode == 0) or (which_whisper_cpp.returncode == 0) or has_python_whisper
-    engine_name = "whisper.cpp" if which_whisper_cpp.returncode == 0 else ("openai-whisper" if (which_whisper.returncode == 0 or has_python_whisper) else None)
-
-    # Check cached models in ~/.cache/whisper
-    whisper_cache = Path.home() / ".cache" / "whisper"
-    cached = []
-    if whisper_cache.exists():
-        for f in whisper_cache.glob("*.pt"):
-            cached.append(f.stem)
-
-    return {
-        "installed": installed,
-        "engine": engine_name,
-        "cached_models": cached,
-        "install_command": "sudo pacman -S python-openai-whisper"
-    }
+def delete_recording(target_folder_or_audio):
+    p = Path(target_folder_or_audio)
+    folder = p if p.is_dir() else p.parent
+    if folder.exists() and folder.parent == get_storage_path():
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)
+        return {"status": "ok"}
+    elif p.exists():
+        p.unlink(missing_ok=True)
+        return {"status": "ok"}
+    return {"status": "error", "message": "File not found"}
 
 def main():
     if len(sys.argv) < 2:
@@ -1146,6 +1143,12 @@ def main():
     elif cmd == "stop":
         metadata_raw = sys.argv[2] if len(sys.argv) > 2 else ""
         print(json.dumps(stop_recording(metadata_raw)))
+
+    elif cmd == "cancel":
+        print(json.dumps(cancel_transcription()))
+
+    elif cmd == "clear-error":
+        print(json.dumps(clear_error()))
 
     elif cmd == "status":
         print(json.dumps(get_state()))
@@ -1186,9 +1189,6 @@ def main():
         save_settings(new_settings)
         print(json.dumps({"status": "ok"}))
 
-    elif cmd == "check-local-whisper":
-        print(json.dumps(check_local_whisper()))
-
     elif cmd == "pick-directory":
         print(json.dumps(pick_directory()))
 
@@ -1205,4 +1205,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

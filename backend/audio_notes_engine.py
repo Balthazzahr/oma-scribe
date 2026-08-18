@@ -638,17 +638,17 @@ def get_available_groq_models(api_key):
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = [m.get("id") for m in data.get("data", []) if m.get("id")]
-            # Exclude guardrails, safety classifiers, audio, speech, and restricted models
+            # Exclude guardrails, safety classifiers, audio, speech, compound pipelines, and restricted models
             excluded = [
                 "guard", "whisper", "orpheus", "tts", "embedding", "safeguard",
-                "moderation", "canopylabs", "allam"
+                "moderation", "canopylabs", "allam", "compound"
             ]
             chat_models = [m for m in models if not any(k in m.lower() for k in excluded)]
             return chat_models
     except Exception:
         return []
 
-def call_groq_chat(messages, api_key, model_list=None, max_tokens=3000):
+def call_groq_chat(messages, api_key, model_list=None, max_tokens=1500):
     """Calls Groq chat completion with automatic model fallback across active LLMs."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     clean_key = (api_key or "").strip()
@@ -702,7 +702,7 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=3000):
 def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_key="", model="llama-3.1-70b-versatile", metadata=None):
     """
     Submits verbatim transcript to Groq LLM for structured synthesis (~1s).
-    Automatically chunks large transcripts (>8,000 chars) to prevent TPM rate limits.
+    Automatically chunks large transcripts (>6,000 chars) to stay safely under TPM rate limits.
     """
     clean_key = (api_key or "").strip()
     meta = metadata or {}
@@ -746,7 +746,6 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
             # 2. Flagship note synthesis (12k TPM)
             if "llama-3.3-70b" in n or "70b" in n: return 100
             if "llama-3.1-8b" in n or "8b" in n: return 85
-            if "compound" in n: return 80
             if "gpt-oss-120b" in n: return 75
             if "gpt-oss-20b" in n: return 70
             if "qwen" in n: return 65
@@ -758,9 +757,9 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
             if m not in models_to_try:
                 models_to_try.append(m)
 
-    # If transcript is large (>8,000 chars), summarize sections first to stay well under TPM limits
+    # If transcript is large (>6,000 chars), summarize sections first to stay well under TPM limits
     processed_transcript = transcript_text
-    if len(transcript_text) > 8000:
+    if len(transcript_text) > 6000:
         update_progress("Synthesizing multi-part meeting transcript in sections...", 65)
         lines = transcript_text.split("\n")
         chunks = []
@@ -769,7 +768,7 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
         for l in lines:
             cur_chunk.append(l)
             cur_len += len(l) + 1
-            if cur_len >= 6500:
+            if cur_len >= 5000:
                 chunks.append("\n".join(cur_chunk))
                 cur_chunk = []
                 cur_len = 0
@@ -784,13 +783,16 @@ def synthesize_notes_with_groq(transcript_text, mode="meeting", title="", api_ke
                 [{"role": "user", "content": sec_prompt}],
                 api_key=clean_key,
                 model_list=models_to_try,
-                max_tokens=1000
+                max_tokens=600
             )
             section_summaries.append(f"### Meeting Segment {idx+1}\n{sec_res}")
             if idx < len(chunks) - 1:
                 time.sleep(1.5)  # Brief delay to prevent burst token usage
 
-        processed_transcript = "## Sectional Syntheses from Verbatim Transcript:\n" + "\n\n".join(section_summaries)
+        combined = "\n\n".join(section_summaries)
+        if len(combined) > 4000:
+            combined = combined[:4000] + "\n...(Summaries condensed)..."
+        processed_transcript = "## Sectional Syntheses from Verbatim Transcript:\n" + combined
 
     update_progress("Generating final executive meeting record...", 85)
 
@@ -878,7 +880,7 @@ REQUIRED FORMAT
         ],
         api_key=clean_key,
         model_list=models_to_try,
-        max_tokens=4096
+        max_tokens=1500
     )
     return result_text, model_used
 

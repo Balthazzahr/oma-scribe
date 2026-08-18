@@ -459,7 +459,7 @@ BarWidget {
     root.updateStatus()
   }
 
-  // --- BAR WIDGET BUTTON (FEATHER ICON ON BAR) ---
+  // --- BAR WIDGET BUTTON (FEATHER ICON WITH JIGGLE ON BAR) ---
   WidgetButton {
     id: button
     anchors.fill: parent
@@ -475,6 +475,14 @@ BarWidget {
         return "\udb81\uded3 " + root.formatDuration(root.transcribeElapsedSeconds)
       }
       return "\udb81\uded3"
+    }
+
+    SequentialAnimation on textRotation {
+      running: root.stateObj.is_processing
+      loops: Animation.Infinite
+      NumberAnimation { from: 0; to: -14; duration: 160; easing.type: Easing.InOutQuad }
+      NumberAnimation { from: -14; to: 14; duration: 320; easing.type: Easing.InOutQuad }
+      NumberAnimation { from: 14; to: 0; duration: 160; easing.type: Easing.InOutQuad }
     }
 
     onPressed: function(btn) {

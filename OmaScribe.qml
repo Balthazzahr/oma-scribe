@@ -499,7 +499,7 @@ BarWidget {
     bar: root.bar
     owner: root
     open: false
-    centerOnBar: true
+    centerOnBar: false
     contentWidth: popupCard.fittedContentWidth(780)
     contentHeight: popupCard.fittedContentHeight(640)
 

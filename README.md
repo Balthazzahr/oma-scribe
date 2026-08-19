@@ -1,59 +1,52 @@
 # omaSCRIBE
 
-> **Smart Meeting Recorder, Verbatim Transcriber & AI Structured Notes Synthesizer for Omarchy Linux Desktop (Quickshell).**
+> **Privacy-First Meeting Recorder, Speaker-Diarized Verbatim Transcriber & 1-Click Google Gemini Web Integration for Omarchy Linux Desktop (Quickshell).**
 
 [![Omarchy Plugin](https://img.shields.io/badge/Omarchy-Plugin-blue.svg)](https://omarchyplugins.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Arch%20Linux%20%2F%20PipeWire-orange.svg)](#requirements)
 
-**omaSCRIBE** is an intelligent, privacy-first audio recording and note-taking widget for the Omarchy Linux desktop. It captures dual-channel online meetings (Microsoft Teams, Zoom, Google Meet, Signal) and voice memos directly from your local PipeWire / PulseAudio server, transcribes verbatim dialog with speaker identification, and generates structured executive markdown notes.
+**omaSCRIBE** is a lightweight, privacy-focused audio recording and transcription widget for the Omarchy Linux desktop. It captures dual-channel online meetings (Microsoft Teams, Zoom, Google Meet, Signal) and voice memos directly from your local PipeWire / PulseAudio server, produces speaker-attributed verbatim transcripts formatted with natural conversational paragraphs, and provides a 1-click pipeline to generate executive summaries in **Google Gemini Web**.
 
 ---
 
-## Release Notes: Complete Visual & Architectural Overhaul
+## What's New in v1.1.0
 
-### 1. Pure JetBrainsMono Nerd Font & Zero Emojis
-- Standardized all UI glyphs on native **JetBrainsMono Nerd Font** (`\ued03`, `󰎚`, `󰒓`, `󱐋`, `󰋋`, `󰔊`, `󰆏`, `󰏫`, `󰉋`, `󰅖`, `󰆓`, `󰁍`).
-- Zero emoji glyphs across all controls, status badges, and notifications.
+### 1. Speaker Attribution & Natural Dialogue Paragraphing
+- **Accurate Speaker Diarization**: Leverages high-confidence conversational context, greeting cues, and attendee lists to attribute dialogue turns (`[MM:SS] - Speaker - Dialogue`).
+- **Safe Fallback**: Unlisted or ambiguous speakers automatically default to `Unknown Male Speaker`, `Unknown Female Speaker`, or `Unknown Speaker`.
+- **Readable Paragraphs**: Long monologues and continuous turns are automatically formatted into readable, natural paragraphs instead of chopped-up fragments.
 
-### 2. Native Omarchy Theme Colors
-- Fully integrated with Omarchy theme tokens (`Color.background`, `Color.foreground`, `Color.accent`, `Color.muted`, `Color.urgent`, `Util.alpha()`).
-- Automatically adapts to any desktop theme palette (Catppuccin, Tokyo Night, Gruvbox, Nord, Solarized, etc.).
+### 2. 1-Click Google Gemini Web Summarization (`✦ Gemini Web`)
+- Generates a structured executive prompt containing the meeting title, attendees, and full verbatim transcript.
+- Automatically copies the prompt to your clipboard (`wl-copy`) and opens [Google Gemini Web](https://gemini.google.com/app) in your default browser.
+- Simply paste (`Ctrl + V`) into Gemini to produce in-depth executive summaries, action item tables, and key decision logs with zero API rate limits or costs.
 
-### 3. Integrated In-App Note & Verbatim Transcript Reader
-- **Direct In-App Reading**: Click any meeting in your library to read the generated executive summary and verbatim dialog directly inside Oma Scribe.
-- **Dual Sub-Tabs**:
-  - `󰎚 Notes`: Structured executive summary, topics discussed, decision log, and markdown action items table.
-  - `󰔊 Transcript`: Timestamped verbatim dialog (`[HH:MM:SS] Speaker: dialog`).
-- **1-Click Clipboard Copy**: Instantly copy formatted notes or transcripts with real-time toast confirmation.
-- **Desktop Actions**: Quick buttons to open the raw files in your default markdown editor (`omarchy-launch-editor` / `code`) or file manager.
+### 3. Native Obsidian & Yazi Desktop Integrations
+- **Obsidian (`obsidian://open`)**: 1-click `[ 󰏫 Open ]` button in the transcript reader navigates directly to the transcript in your Obsidian vault.
+- **Yazi File Manager**: 1-click `[ 󰉋 Folder ]` button opens the meeting directory directly in the **Yazi** terminal file manager with `transcript.md` focused and selected.
+- **Auto-Dismiss**: Launching Obsidian or Yazi automatically dismisses the Quickshell popup panel.
 
-### 4. High-Performance Groq Cloud LPU Pipeline
-- **Whisper Large v3 (Audio)**: Transcribes 30-minute meetings in **under 8 seconds** on Groq LPUs.
-- **Map-Reduce Section Synthesis**: Automatically chunks transcripts over 18,000 characters into parallel sections, eliminating Tokens-Per-Minute (TPM) rate limit errors on long meetings.
-- **Immediate Transcript Save**: `transcript.md` is written to disk immediately after Whisper completes so dialog is never lost.
-- **Dynamic Model Selection**: Filters out security classifiers, guardrails, and speech models, dynamically selecting the highest-performing chat LLMs available.
-
-### 5. Streamlined Controls & Form Handling
-- **Icon-Only Bar Widget**: Displays the studio microphone (`\ued03`) with active timer during recordings, remaining minimal when idle.
-- **Clean Attendees Input**: Disappearing instruction placeholder allowing flexible attendee entry with host and role descriptors.
-- **Non-Crushed Settings Layout**: Responsive pill selectors for document formats (`.md`, `.txt`, `.html`) and voice audio codecs (`Opus`, `AAC`, `MP3`).
+### 4. Pure JetBrainsMono Nerd Font & Native Omarchy Theming
+- Standardized all UI glyphs on native **JetBrainsMono Nerd Font** (`\udb81\uded3`, `\ued03`, `󰋋`, `󰔊`, `󰆏`, `󰏫`, `󰉋`, `󰆴`, `󰁍`, `✦`).
+- Fully integrated with Omarchy theme tokens (`Color.background`, `Color.foreground`, `Color.accent`, `Color.muted`, `Color.urgent`).
+- Animated feather quill (`\udb81\uded3`) indicator with live recording timer.
 
 ---
 
 ## Features
 
 - **Dual-Channel Online Meeting Capture**: Simultaneously records local microphone and system audio (`default.monitor`) so all remote participants are captured with crystal clarity without requiring meeting bots or browser extensions.
-- **Voice Memo Mode**: 1-click solo dictation capturing your microphone for thoughts, ideas, and reminders.
+- **Voice Memo Mode**: 1-click solo dictation capturing your microphone for quick thoughts, ideas, and reminders.
 - **Voice-Optimized Audio (`24k VOIP Opus`)**: Compresses voice recordings by ~75–80% (~8–10MB per hour) for rapid uploads without losing transcription accuracy.
-- **Organized Note Storage**: Saves every recording into a dedicated, clean folder under `~/Documents/AudioNotes/<Title> - <YYYY-MM-DD> - <h-mma>/` containing:
+- **Clean File Storage**: Saves every recording into a dedicated, clean folder under `~/Documents/Notes/Audio Notes/<Title> - <YYYY-MM-DD> - <h-mma>/` containing:
   - `recording.opus` (Voice-optimized audio)
-  - `notes.md` (Executive Summary, Key Decisions, Action Items with Owners, Topics Discussed)
-  - `transcript.md` (Pure timestamped verbatim transcript: `[HH:MM:SS] Speaker: text`)
-- **Desktop Integration**:
-  - Top bar live duration indicator and right-click quick-toggle recording.
-  - Native Linux desktop notifications on recording start, completion, and transcription ready.
-  - 1-click open in default markdown editor or file manager.
+  - `transcript.md` (Speaker-attributed verbatim transcript)
+  - `.metadata.json` (Meeting title, attendees, topics, and timestamps)
+- **Top Bar Integration**:
+  - Live duration indicator during recordings.
+  - Right-click quick-toggle recording.
+  - Animated transcription indicator.
 
 ---
 
@@ -64,6 +57,7 @@ Oma Scribe uses standard Linux tools available by default on Arch Linux / Omarch
 - **PipeWire / PulseAudio** with `ffmpeg` (for system loopback & microphone capture)
 - **Python 3** (standard library only; no external pip dependencies required)
 - **Quickshell / Omarchy desktop**
+- *(Optional)* **Obsidian** & **Yazi** for native note and file browsing
 
 ---
 
@@ -110,7 +104,7 @@ Open the **Settings** tab in Oma Scribe to configure your Groq API Key:
 
 ## Keyboard & Mouse Controls
 
-- **Left-Click Top Bar Icon (`\ued03`)**: Opens the Oma Scribe popup window.
+- **Left-Click Top Bar Icon (`\udb81\uded3` / `\ued03`)**: Opens the Oma Scribe popup window.
 - **Right-Click Top Bar Icon**: Instant Start / Stop recording toggle.
 - **Tab Key Navigation**: Cycle through Title $\rightarrow$ Topics $\rightarrow$ Attendees in the pre-meeting form.
 
@@ -120,7 +114,7 @@ Open the **Settings** tab in Oma Scribe to configure your Groq API Key:
 
 - **Invisible in Meetings**: Oma Scribe records local audio directly from your Linux sound server. Meeting platforms (Teams, Zoom, Google Meet) cannot detect that a recording is running.
 - **Zero Hard-Coded Keys**: All API keys and preferences are stored locally in your private `~/.config/omarchy/audio_notes.json`.
-- **Local Storage**: All recordings and notes reside strictly on your local disk (`~/Documents/AudioNotes/`).
+- **Local Storage**: All recordings and transcripts reside strictly on your local disk (`~/Documents/Notes/Audio Notes/`).
 
 ---
 

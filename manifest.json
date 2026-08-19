@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "balthazzahr.oma-scribe",
   "name": "Oma Scribe",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Balthazzahr",
-  "description": "Smart audio recording, transcription, and meeting notes generator for Teams/Zoom/online meetings and voice memos.",
+  "description": "Smart meeting audio recording, diarized verbatim transcription, and 1-click Google Gemini Web summarization.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Oma Scribe",
-    "description": "Record online meetings or voice memos, transcribe, and synthesize AI structured meeting notes",
+    "description": "Record dual-channel meetings or voice memos, generate speaker-attributed transcripts, and export directly to Gemini Web, Obsidian & Yazi",
     "category": "Productivity",
     "allowMultiple": false
   }

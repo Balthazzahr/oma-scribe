@@ -1130,31 +1130,46 @@ def list_history():
 def open_file_in_editor(file_path):
     if not file_path:
         return
-    p = Path(file_path)
+    p = Path(file_path).resolve()
     if p.is_dir():
         cand = p / "transcript.md"
         if cand.exists():
-            file_path = str(cand)
+            p = cand
+        else:
+            cand_notes = p / "notes.md"
+            if cand_notes.exists():
+                p = cand_notes
     elif not p.exists() and p.parent.exists():
         cand = p.parent / "transcript.md"
         if cand.exists():
-            file_path = str(cand)
+            p = cand
 
-    if not os.path.exists(file_path):
+    if not p.exists():
         return
 
-    # For Markdown documents, prioritize Obsidian or system default app
-    if file_path.endswith(".md"):
+    str_path = str(p)
+
+    # For Markdown files, open directly in Obsidian via obsidian:// URI scheme
+    if str_path.endswith(".md"):
+        encoded = urllib.parse.quote(str_path)
+        obs_uri = f"obsidian://open?path={encoded}"
+        try:
+            subprocess.Popen(["xdg-open", obs_uri], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            pass
+
         obs_bin = shutil.which("obsidian")
         if obs_bin:
             try:
-                subprocess.Popen([obs_bin, file_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen([obs_bin, obs_uri], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
             except Exception:
                 pass
 
+    # Fallback to system default application via xdg-open
     try:
-        subprocess.Popen(["xdg-open", file_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["xdg-open", str_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
     except Exception:
         pass
@@ -1162,14 +1177,55 @@ def open_file_in_editor(file_path):
     try:
         ed_bin = shutil.which("omarchy-launch-editor")
         if ed_bin:
-            subprocess.Popen([ed_bin, file_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen([ed_bin, str_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
-def open_storage_folder():
-    storage = get_storage_path()
+def open_storage_folder(target_folder_or_file=None):
+    if not target_folder_or_file:
+        target_folder_or_file = get_storage_path()
+    
+    p = Path(target_folder_or_file).resolve()
+    target_file = None
+
+    if p.is_dir():
+        cand = p / "transcript.md"
+        if cand.exists():
+            target_file = cand
+        else:
+            cand_notes = p / "notes.md"
+            if cand_notes.exists():
+                target_file = cand_notes
+    elif p.exists():
+        target_file = p
+
+    # Try DBus ShowItems to open folder with transcript.md highlighted
+    if target_file and target_file.exists():
+        try:
+            file_uri = target_file.as_uri()
+            res = subprocess.run([
+                "dbus-send", "--session", "--dest=org.freedesktop.FileManager1",
+                "--type=method_call", "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+                f"array:string:{file_uri}", "string:"
+            ], capture_output=True, timeout=2)
+            if res.returncode == 0:
+                return
+        except Exception:
+            pass
+
+        nautilus_bin = shutil.which("nautilus")
+        if nautilus_bin:
+            try:
+                subprocess.Popen([nautilus_bin, "--select", str(target_file)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                pass
+
+    # Fallback to xdg-open on directory
+    folder = p if p.is_dir() else p.parent
     try:
-        subprocess.Popen(["xdg-open", str(storage)])
+        subprocess.Popen(["xdg-open", str(folder)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
@@ -1266,7 +1322,8 @@ def main():
         print(json.dumps({"status": "ok"}))
 
     elif cmd == "open-storage-folder":
-        open_storage_folder()
+        target = sys.argv[2] if len(sys.argv) > 2 else ""
+        open_storage_folder(target)
         print(json.dumps({"status": "ok"}))
 
     elif cmd == "get-settings":

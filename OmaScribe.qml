@@ -170,7 +170,7 @@ BarWidget {
 
   function openFolder(folderPath) {
     if (folderPath) {
-      execProc.command = ["xdg-open", folderPath]
+      execProc.command = ["python3", enginePath, "open-storage-folder", folderPath]
     } else {
       execProc.command = ["python3", enginePath, "open-storage-folder"]
     }

@@ -1196,11 +1196,34 @@ def open_storage_folder(target_folder_or_file=None):
             cand_notes = p / "notes.md"
             if cand_notes.exists():
                 target_file = cand_notes
+            else:
+                target_file = p
     elif p.exists():
         target_file = p
+    else:
+        target_file = p.parent if p.parent.exists() else get_storage_path()
 
-    # Try DBus ShowItems to open folder with transcript.md highlighted
-    if target_file and target_file.exists():
+    target_str = str(target_file)
+
+    # 1. Prioritize Yazi file manager in terminal
+    if shutil.which("yazi"):
+        tui_bin = shutil.which("omarchy-launch-tui")
+        if tui_bin:
+            try:
+                subprocess.Popen([tui_bin, "yazi", target_str], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                pass
+        term_bin = shutil.which("xdg-terminal-exec")
+        if term_bin:
+            try:
+                subprocess.Popen([term_bin, "-e", "yazi", target_str], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                pass
+
+    # 2. Fallback to DBus ShowItems / Nautilus / xdg-open
+    if target_file and target_file.is_file():
         try:
             file_uri = target_file.as_uri()
             res = subprocess.run([
@@ -1214,15 +1237,6 @@ def open_storage_folder(target_folder_or_file=None):
         except Exception:
             pass
 
-        nautilus_bin = shutil.which("nautilus")
-        if nautilus_bin:
-            try:
-                subprocess.Popen([nautilus_bin, "--select", str(target_file)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
-            except Exception:
-                pass
-
-    # Fallback to xdg-open on directory
     folder = p if p.is_dir() else p.parent
     try:
         subprocess.Popen(["xdg-open", str(folder)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

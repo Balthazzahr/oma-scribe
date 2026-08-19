@@ -824,7 +824,7 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
                 ],
                 api_key=api_key,
                 model_list=models_to_try,
-                max_tokens=2000
+                max_tokens=700
             )
             clean_res = res.strip()
             # Extract ONLY valid timestamped dialogue lines

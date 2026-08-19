@@ -1228,7 +1228,7 @@ BarWidget {
                 }
                 Text {
                   Layout.fillWidth: true
-                  text: root.currentReaderItem ? (root.currentReaderItem.date + " • " + root.currentReaderItem.size_kb + " KB" + (root.currentReaderItem.has_notes ? " • Notes Ready" : " • Audio Only")) : ""
+                  text: root.currentReaderItem ? (root.currentReaderItem.date + " • " + root.currentReaderItem.size_kb + " KB" + (root.currentReaderItem.has_transcript ? " • Transcript Ready" : " • Audio Only")) : ""
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 10
                   color: Color.muted
@@ -1250,7 +1250,7 @@ BarWidget {
                   color: Color.foreground
                 }
                 ToolTip.visible: edHover.containsMouse
-                ToolTip.text: "Open raw file in external editor"
+                ToolTip.text: "Open raw transcript file in external editor"
                 ToolTip.delay: 300
                 MouseArea {
                   id: edHover
@@ -1259,8 +1259,8 @@ BarWidget {
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     if (!root.currentReaderItem) return
-                    var fp = root.activeReaderSubTab === 1 ? root.currentReaderItem.notes_file : root.currentReaderItem.transcript_file
-                    root.openInEditor(fp || root.currentReaderItem.audio_file)
+                    var fp = root.currentReaderItem.transcript_file || root.currentReaderItem.audio_file
+                    root.openInEditor(fp)
                   }
                 }
               }
@@ -1294,13 +1294,13 @@ BarWidget {
             }
 
             // ==========================================
-            // READER HEADER ROW 2: Library Back, Sub-Tabs & Action Toolbar
+            // READER HEADER ROW 2: Library Back & Action Toolbar
             // ==========================================
             RowLayout {
               Layout.fillWidth: true
               spacing: 8
 
-              // Back to Library Button (On Row 2 with Sub-Tabs)
+              // Back to Library Button
               Rectangle {
                 width: 96
                 height: 34
@@ -1321,58 +1321,6 @@ BarWidget {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: root.isReaderOpen = false
-                }
-              }
-
-              // Sub-Tabs: Transcript (0) first, then Structured Notes (1)
-              Rectangle {
-                Layout.preferredHeight: 34
-                Layout.preferredWidth: 260
-                radius: 6
-                color: Util.alpha(Color.foreground, 0.08)
-
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.margins: 2
-                  spacing: 2
-
-                  // Sub-Tab 0: Transcript (Verbatim transcription first)
-                  Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    radius: 5
-                    color: root.activeReaderSubTab === 0 ? Color.accent : "transparent"
-                    RowLayout {
-                      anchors.centerIn: parent
-                      spacing: 5
-                      Text { text: "󰔊"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
-                      Text { text: "Transcript"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 0 ? Color.pick("background", "#1e1e2e") : Color.foreground }
-                    }
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.activeReaderSubTab = 0
-                    }
-                  }
-
-                  // Sub-Tab 1: Structured Notes (Document with writing lines)
-                  Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    radius: 5
-                    color: root.activeReaderSubTab === 1 ? Color.accent : "transparent"
-                    RowLayout {
-                      anchors.centerIn: parent
-                      spacing: 5
-                      Text { text: "󰈙"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 12; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
-                      Text { text: "Structured Notes"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: root.activeReaderSubTab === 1 ? Color.pick("background", "#1e1e2e") : Color.foreground }
-                    }
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.activeReaderSubTab = 1
-                    }
-                  }
                 }
               }
 
@@ -1439,8 +1387,7 @@ BarWidget {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
-                    var txt = root.activeReaderSubTab === 0 ? root.activeReaderTransText : root.activeReaderNotesText
-                    root.copyText(txt, root.activeReaderSubTab === 0 ? "Transcript copied" : "Notes copied")
+                    root.copyText(root.activeReaderTransText, "Transcript copied")
                   }
                 }
               }
@@ -1455,8 +1402,8 @@ BarWidget {
                 border.color: Color.accent
                 RowLayout {
                   anchors.centerIn: parent
-                  spacing: 5
-                  Text { text: "󰚩"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.accent }
+                  spacing: 6
+                  Text { text: "✦"; font.pixelSize: 14; font.bold: true; color: Color.accent }
                   Text { text: "Gemini Web"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
                 }
                 ToolTip.visible: geminiHover.containsMouse
@@ -1497,7 +1444,7 @@ BarWidget {
                   font.family: "JetBrainsMono Nerd Font"
                   font.pixelSize: 11
                   color: Color.foreground
-                  text: root.activeReaderSubTab === 0 ? root.activeReaderTransText : root.activeReaderNotesText
+                  text: root.activeReaderTransText
                 }
               }
             }
@@ -1716,14 +1663,14 @@ BarWidget {
                         }
                         Text {
                           Layout.fillWidth: true
-                          text: modelData.date + " • " + modelData.size_kb + " KB" + (modelData.has_notes ? " • Notes Ready" : " • Audio Only")
+                          text: modelData.date + " • " + modelData.size_kb + " KB" + (modelData.has_transcript ? " • Transcript Ready" : " • Audio Only")
                           font.family: "JetBrainsMono Nerd Font"
                           font.pixelSize: 10
-                          color: modelData.has_notes ? Color.accent : Color.muted
+                          color: modelData.has_transcript ? Color.accent : Color.muted
                         }
                       }
 
-                      // Perfectly Aligned 4-Button Toolbar: Transcript -> Notes -> Transcribe -> Bin
+                      // Perfectly Aligned 4-Button Toolbar: Transcript -> Gemini Web -> Transcribe -> Bin
                       RowLayout {
                         Layout.preferredHeight: 32
                         Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
@@ -1757,31 +1704,31 @@ BarWidget {
                           }
                         }
 
-                        // 2. Structured Notes Icon Button (32x32, Page with writing lines)
+                        // 2. Gemini Web Icon Button (32x32, Sparkle Star)
                         Rectangle {
                           Layout.preferredWidth: 32
                           Layout.preferredHeight: 32
                           Layout.alignment: Qt.AlignVCenter
                           radius: 5
-                          color: modelData.has_notes ? (notesBtnArea.containsMouse ? Util.alpha(Color.accent, 0.28) : Util.alpha(Color.accent, 0.16)) : Util.alpha(Color.foreground, 0.04)
-                          opacity: modelData.has_notes ? 1.0 : 0.25
+                          color: modelData.has_transcript ? (geminiCardBtnArea.containsMouse ? Util.alpha(Color.accent, 0.28) : Util.alpha(Color.accent, 0.16)) : Util.alpha(Color.foreground, 0.04)
+                          opacity: modelData.has_transcript ? 1.0 : 0.25
                           Text {
                             anchors.centerIn: parent
-                            text: "󰈙"
-                            font.family: "JetBrainsMono Nerd Font"
-                            font.pixelSize: 13
-                            color: modelData.has_notes ? Color.accent : Color.muted
+                            text: "✦"
+                            font.pixelSize: 14
+                            font.bold: true
+                            color: modelData.has_transcript ? Color.accent : Color.muted
                           }
-                          ToolTip.visible: notesBtnArea.containsMouse
-                          ToolTip.text: modelData.has_notes ? "View Structured Notes" : "No notes generated yet"
+                          ToolTip.visible: geminiCardBtnArea.containsMouse
+                          ToolTip.text: modelData.has_transcript ? "Copy prompt to clipboard & launch Google Gemini Web" : "Transcribe first to open in Gemini"
                           ToolTip.delay: 250
                           MouseArea {
-                            id: notesBtnArea
+                            id: geminiCardBtnArea
                             anchors.fill: parent
                             hoverEnabled: true
-                            enabled: modelData.has_notes
-                            cursorShape: modelData.has_notes ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: root.openReader(modelData, 1)
+                            enabled: modelData.has_transcript
+                            cursorShape: modelData.has_transcript ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: root.openInGemini(modelData)
                           }
                         }
 
@@ -1793,7 +1740,7 @@ BarWidget {
                           radius: 5
                           color: isTranscribingThis
                             ? Util.alpha(Color.accent, 0.35)
-                            : (!modelData.has_notes
+                            : (!modelData.has_transcript
                               ? (runTransArea.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.85))
                               : (runTransArea.containsMouse ? Util.alpha(Color.foreground, 0.16) : Util.alpha(Color.foreground, 0.08)))
                           Text {
@@ -1804,7 +1751,7 @@ BarWidget {
                             font.pixelSize: 13
                             color: isTranscribingThis
                               ? Color.accent
-                              : (!modelData.has_notes ? Color.pick("background", "#1e1e2e") : Color.foreground)
+                              : (!modelData.has_transcript ? Color.pick("background", "#1e1e2e") : Color.foreground)
                             transformOrigin: Item.Center
 
                             SequentialAnimation {
@@ -1822,7 +1769,7 @@ BarWidget {
                             }
                           }
                           ToolTip.visible: runTransArea.containsMouse
-                          ToolTip.text: isTranscribingThis ? "Transcribing in progress..." : (modelData.has_notes ? "Re-transcribe audio with Groq AI" : "Transcribe audio with Groq AI")
+                          ToolTip.text: isTranscribingThis ? "Transcribing in progress..." : (modelData.has_transcript ? "Re-transcribe audio with Groq AI" : "Transcribe audio with Groq AI")
                           ToolTip.delay: 250
                           MouseArea {
                             id: runTransArea
@@ -1849,7 +1796,7 @@ BarWidget {
                             color: delArea.containsMouse ? Color.urgent : Color.muted
                           }
                           ToolTip.visible: delArea.containsMouse
-                          ToolTip.text: "Delete recording and notes"
+                          ToolTip.text: "Delete recording and transcript"
                           ToolTip.delay: 250
                           MouseArea {
                             id: delArea

@@ -654,13 +654,18 @@ def strip_think_tags(text):
         return ""
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL)
     cleaned = re.sub(r"</?think>", "", cleaned)
-    # If reasoning preamble exists before markdown headers, extract starting at the first header
-    if "## " in cleaned:
-        idx = cleaned.find("## ")
-        cleaned = cleaned[idx:]
+    lines = cleaned.split("\n")
+    first_content_idx = 0
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if re.match(r"^\[\d{1,2}:\d{2}", s) or s.startswith("## ") or s.startswith("{") or s.startswith("["):
+            first_content_idx = i
+            break
+    if first_content_idx > 0:
+        cleaned = "\n".join(lines[first_content_idx:])
     return cleaned.strip()
 
-def call_groq_chat(messages, api_key, model_list=None, max_tokens=1200):
+def call_groq_chat(messages, api_key, model_list=None, max_tokens=1500):
     """Calls Groq chat completion with automatic model fallback and rate-limit backoff across active LLMs."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     clean_key = (api_key or "").strip()
@@ -703,7 +708,6 @@ def call_groq_chat(messages, api_key, model_list=None, max_tokens=1200):
             except urllib.error.HTTPError as e:
                 err_msg = extract_http_error(e)
                 last_errors.append(f"{m} (att {attempt+1}) -> {err_msg}")
-                # If rate limited (429) or busy (503), back off and retry
                 if e.code in (429, 413, 503):
                     time.sleep(3.0 * (attempt + 1))
                     continue
@@ -732,28 +736,39 @@ def sanitize_whisper_prompt(raw_text):
     t = ", ".join([w.strip() for w in t.split(",") if w.strip()])
     return t[:350]
 
+def normalize_dialogue_line(pl, default_speaker="Unknown Speaker"):
+    """Normalizes any dialogue line strictly to: [TIME] - SPEAKER - Spoken words"""
+    pl = pl.strip()
+    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*-\s*([^-]+?)\s*-\s*(.+)$", pl)
+    if m and m.group(2).strip() and m.group(3).strip():
+        return f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}"
+    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*:\s*(.+)$", pl)
+    if m and m.group(2).strip() and m.group(3).strip():
+        return f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}"
+    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*-\s*(.+)$", pl)
+    if m and m.group(2).strip() and m.group(3).strip():
+        return f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}"
+    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", pl)
+    if m and m.group(2).strip():
+        return f"{m.group(1)} - {default_speaker} - {m.group(2).strip()}"
+    return pl
+
 def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
     """
     Takes timestamped Whisper output ([MM:SS] Text) and formats strictly as:
     [TIME] - SPEAKER - Spoken text
-    If speaker cannot be identified, uses 'Unknown Male Speaker', 'Unknown Female Speaker', or 'Unknown Speaker'.
+    Assigns speaker names from attendees_meta (making best guess).
     """
     if not raw_transcript or not raw_transcript.strip():
         return raw_transcript
 
     if not attendees_meta:
-        # If no attendees provided, format timestamp as [TIME] - Unknown Speaker - text
         formatted_lines = []
         for line in raw_transcript.split("\n"):
             line = line.strip()
             if not line:
                 continue
-            m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.*)", line)
-            if m:
-                ts, content = m.group(1), m.group(2)
-                formatted_lines.append(f"{ts} - Unknown Speaker - {content}")
-            else:
-                formatted_lines.append(line)
+            formatted_lines.append(normalize_dialogue_line(line, "Unknown Speaker"))
         return "\n".join(formatted_lines)
 
     # Format attendee guidance for LLM
@@ -782,28 +797,25 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
     attributed_lines = []
 
     sys_prompt = (
-        "You are an expert audio transcriptionist and speaker attribution specialist. "
-        "Your task is to take a timestamped transcript and attribute each dialogue turn to the correct speaker "
-        "based on the provided attendee list, their genders/roles, conversational tone, and speech flow.\n\n"
-        "CRITICAL FORMAT RULES:\n"
-        "1. Every single line MUST strictly follow the exact format: [TIME] - SPEAKER - Spoken text\n"
+        "You are an audio diarization and speaker attribution expert.\n"
+        "Your task is to take a timestamped transcript and attribute EVERY single line to the most likely speaker from the provided attendee list.\n\n"
+        "CRITICAL ATTRIBUTION RULES:\n"
+        "1. You MUST attribute each line to one of the provided attendee names. Make your best guess based on conversational flow, tone, and spoken context.\n"
+        "2. Every single line MUST strictly follow the exact format: [TIME] - Speaker Name - Spoken text\n"
         "   Example: [00:21] - Toni Criminello - It's disruptive. It's very disruptive for the team.\n"
-        "2. If a speaker cannot be identified from the attendee list, use 'Unknown Male Speaker' or 'Unknown Female Speaker' or 'Unknown Speaker'.\n"
-        "3. Preserve all verbatim spoken words and exact timestamps from the input. Do NOT summarize, rephrase, or omit words.\n"
-        "4. Do NOT output any thinking process, preamble, explanation, or markdown headers. Output ONLY the formatted dialogue lines."
+        "3. Preserve all verbatim spoken words and exact timestamps. Do NOT summarize or drop any lines.\n"
+        "4. Do NOT output any thinking, intro, markdown headers, or explanation. Start line 1 immediately with the first timestamp."
     )
 
-    models_to_try = get_available_groq_models(api_key)
-    if not models_to_try:
-        models_to_try = [
-            "openai/gpt-oss-120b",
-            "openai/gpt-oss-20b",
-            "qwen/qwen3.6-27b"
-        ]
+    models_to_try = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.6-27b"
+    ]
 
     for idx, batch in enumerate(batches):
         batch_text = "\n".join(batch)
-        user_prompt = f"Meeting Attendees:\n{att_str}\n\nTimestamped Transcript to Format:\n{batch_text}"
+        user_prompt = f"Meeting Attendees:\n{att_str}\n\nTimestamped Transcript to Attribute:\n{batch_text}"
         try:
             res, _ = call_groq_chat(
                 [
@@ -812,7 +824,7 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
                 ],
                 api_key=api_key,
                 model_list=models_to_try,
-                max_tokens=1500
+                max_tokens=2000
             )
             clean_res = res.strip()
             # Extract ONLY valid timestamped dialogue lines
@@ -823,37 +835,14 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
             ]
             if parsed_lines:
                 for pl in parsed_lines:
-                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*-\s*(.+?)\s*-\s*(.+)$", pl)
-                    if m:
-                        attributed_lines.append(f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}")
-                        continue
-                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*:\s*(.+)$", pl)
-                    if m:
-                        attributed_lines.append(f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}")
-                        continue
-                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*-\s*(.+)$", pl)
-                    if m:
-                        attributed_lines.append(f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}")
-                        continue
-                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", pl)
-                    if m:
-                        attributed_lines.append(f"{m.group(1)} - Unknown Speaker - {m.group(2).strip()}")
-                    else:
-                        attributed_lines.append(pl)
+                    norm = normalize_dialogue_line(pl)
+                    attributed_lines.append(norm)
             else:
                 for bl in batch:
-                    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", bl)
-                    if m:
-                        attributed_lines.append(f"{m.group(1)} - Unknown Speaker - {m.group(2).strip()}")
-                    else:
-                        attributed_lines.append(bl)
+                    attributed_lines.append(normalize_dialogue_line(bl, "Unknown Speaker"))
         except Exception:
             for bl in batch:
-                m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", bl)
-                if m:
-                    attributed_lines.append(f"{m.group(1)} - Unknown Speaker - {m.group(2).strip()}")
-                else:
-                    attributed_lines.append(bl)
+                attributed_lines.append(normalize_dialogue_line(bl, "Unknown Speaker"))
 
         if idx < len(batches) - 1:
             time.sleep(1.0)

@@ -841,16 +841,21 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
     attributed_lines = []
 
     sys_prompt = (
-        "You are an expert audio diarization and speaker attribution specialist.\n"
-        "Your task is to take a timestamped transcript and attribute each dialogue turn to the correct speaker "
-        "using conversational context, address cues (e.g., 'Hi Dave', 'Thanks Roxanne'), speaking flow, and the attendee list.\n\n"
-        "CONFIDENCE RULES & ATTRIBUTION GUIDELINES:\n"
-        "1. STRICT CONFIDENCE THRESHOLD: Only assign a specific attendee's name if you are confident based on context, direct address, or conversational roles.\n"
-        "2. If you are uncertain or if an unlisted participant speaks, attribute them as 'Unknown Male Speaker' or 'Unknown Female Speaker' (or 'Unknown Speaker'). Do NOT guess or force-assign names without clear context.\n"
-        "3. Every line MUST follow the exact format: [TIME] - Speaker Name - Spoken text\n"
-        "   Example: [00:21] - Toni Criminello - It's disruptive. It's very disruptive for the team.\n"
-        "4. Preserve all verbatim spoken words and exact timestamps without omitting or summarizing.\n"
-        "5. Output ONLY the timestamped dialogue lines without any preamble, reasoning, or markdown headers."
+        "You are a professional meeting transcriptionist and diarization editor.\n"
+        "Your task is to take raw timestamped snippets and convert them into natural, beautifully formatted conversational dialogue.\n\n"
+        "RULES:\n"
+        "1. DIALOGUE TURNS & PARAGRAPHS:\n"
+        "   - When a speaker speaks or takes a turn, start the entry with:\n"
+        "     [MM:SS] - Speaker Name - Spoken text...\n"
+        "   - Combine continuous speech from the same speaker into natural sentences and paragraphs.\n"
+        "   - For long speech blocks, break them into readable paragraphs (2-4 sentences each) with their timestamp so it is comfortable and easy for humans to read.\n"
+        "2. SPEAKER ATTRIBUTION & CONFIDENCE:\n"
+        "   - Attribute speakers based on context, greetings, and conversational flow.\n"
+        "   - If not confident in a specific attendee, label as 'Unknown Male Speaker' or 'Unknown Female Speaker' (or 'Unknown Speaker').\n"
+        "3. FIDELITY:\n"
+        "   - Preserve all verbatim spoken words. Do not summarize or omit text.\n"
+        "4. FORMAT:\n"
+        "   - Start immediately with the first dialogue turn. No introductory remarks."
     )
 
     models_to_try = [
@@ -861,7 +866,7 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
 
     for idx, batch in enumerate(batches):
         batch_text = "\n".join(batch)
-        user_prompt = f"Meeting Attendees:\n{att_str}\n\nTimestamped Transcript to Attribute:\n{batch_text}"
+        user_prompt = f"Meeting Attendees:\n{att_str}\n\nRaw Audio Snippets:\n{batch_text}"
         try:
             res, _ = call_groq_chat(
                 [
@@ -870,22 +875,17 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
                 ],
                 api_key=api_key,
                 model_list=models_to_try,
-                max_tokens=1500
+                max_tokens=1800
             )
             clean_res = res.strip()
-            # Extract ONLY valid timestamped dialogue lines
-            parsed_lines = [
-                l.strip()
-                for l in clean_res.split("\n")
-                if re.match(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]", l.strip())
-            ]
-            if parsed_lines:
-                for pl in parsed_lines:
-                    norm = normalize_dialogue_line(pl)
-                    attributed_lines.append(norm)
-            else:
-                for bl in batch:
-                    attributed_lines.append(normalize_dialogue_line(bl, "Unknown Speaker"))
+            for l in clean_res.split("\n"):
+                l_str = l.strip()
+                if not l_str:
+                    continue
+                if re.match(r"^\[\d{1,2}:\d{2}", l_str):
+                    attributed_lines.append(normalize_dialogue_line(l_str))
+                else:
+                    attributed_lines.append(l_str)
         except Exception:
             for bl in batch:
                 attributed_lines.append(normalize_dialogue_line(bl, "Unknown Speaker"))
@@ -893,8 +893,8 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
         if idx < len(batches) - 1:
             time.sleep(1.0)
 
-    unmerged_raw = "\n".join(attributed_lines).strip()
-    return merge_consecutive_speaker_turns(unmerged_raw)
+    unmerged_raw = "\n\n".join([l for l in attributed_lines if l.strip()]).strip()
+    return unmerged_raw
 
 def prepare_gemini_prompt_and_open(transcript_path, title="", attendees=""):
     """

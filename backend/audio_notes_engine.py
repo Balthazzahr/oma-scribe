@@ -24,6 +24,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import subprocess
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -1127,17 +1128,41 @@ def list_history():
     return items[:50]
 
 def open_file_in_editor(file_path):
-    if not file_path or not os.path.exists(file_path):
+    if not file_path:
         return
+    p = Path(file_path)
+    if p.is_dir():
+        cand = p / "transcript.md"
+        if cand.exists():
+            file_path = str(cand)
+    elif not p.exists() and p.parent.exists():
+        cand = p.parent / "transcript.md"
+        if cand.exists():
+            file_path = str(cand)
+
+    if not os.path.exists(file_path):
+        return
+
+    # For Markdown documents, prioritize Obsidian or system default app
+    if file_path.endswith(".md"):
+        obs_bin = shutil.which("obsidian")
+        if obs_bin:
+            try:
+                subprocess.Popen([obs_bin, file_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                pass
+
     try:
-        res = subprocess.run(["which", "omarchy-launch-editor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode == 0:
-            subprocess.Popen(["omarchy-launch-editor", file_path])
-            return
+        subprocess.Popen(["xdg-open", file_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
     except Exception:
         pass
+
     try:
-        subprocess.Popen(["xdg-open", file_path])
+        ed_bin = shutil.which("omarchy-launch-editor")
+        if ed_bin:
+            subprocess.Popen([ed_bin, file_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 

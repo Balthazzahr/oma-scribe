@@ -1331,7 +1331,7 @@ BarWidget {
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     if (root.currentReaderItem) {
-                      var fp = root.currentReaderItem.transcript_file || root.currentReaderItem.audio_file
+                      var fp = root.currentReaderItem.transcript_file || (root.currentReaderItem.folder ? (root.currentReaderItem.folder + "/transcript.md") : "") || root.currentReaderItem.audio_file
                       root.openInEditor(fp)
                       popupCard.open = false
                     }

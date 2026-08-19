@@ -1207,7 +1207,7 @@ BarWidget {
             spacing: 10
 
             // ==========================================
-            // READER HEADER ROW 1: Full-Width Title & Top External Actions
+            // READER HEADER ROW 1: Full-Width Title & Metadata
             // ==========================================
             RowLayout {
               Layout.fillWidth: true
@@ -1235,62 +1235,6 @@ BarWidget {
                   elide: Text.ElideRight
                 }
               }
-
-              // External Editor Button
-              Rectangle {
-                width: 34
-                height: 34
-                radius: 6
-                color: edHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
-                Text {
-                  anchors.centerIn: parent
-                  text: "󰏫"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 14
-                  color: Color.foreground
-                }
-                ToolTip.visible: edHover.containsMouse
-                ToolTip.text: "Open raw transcript file in external editor"
-                ToolTip.delay: 300
-                MouseArea {
-                  id: edHover
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    if (!root.currentReaderItem) return
-                    var fp = root.currentReaderItem.transcript_file || root.currentReaderItem.audio_file
-                    root.openInEditor(fp)
-                  }
-                }
-              }
-
-              // Folder Button
-              Rectangle {
-                width: 34
-                height: 34
-                radius: 6
-                color: folHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
-                Text {
-                  anchors.centerIn: parent
-                  text: "󰉋"
-                  font.family: "JetBrainsMono Nerd Font"
-                  font.pixelSize: 14
-                  color: Color.foreground
-                }
-                ToolTip.visible: folHover.containsMouse
-                ToolTip.text: "Open folder in file manager"
-                ToolTip.delay: 300
-                MouseArea {
-                  id: folHover
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    if (root.currentReaderItem) root.openFolder(root.currentReaderItem.folder)
-                  }
-                }
-              }
             }
 
             // ==========================================
@@ -1298,11 +1242,11 @@ BarWidget {
             // ==========================================
             RowLayout {
               Layout.fillWidth: true
-              spacing: 8
+              spacing: 6
 
               // Back to Library Button
               Rectangle {
-                width: 96
+                width: 92
                 height: 34
                 radius: 6
                 color: backHover.containsMouse ? Util.alpha(Color.foreground, 0.14) : Util.alpha(Color.foreground, 0.08)
@@ -1336,9 +1280,68 @@ BarWidget {
                 color: Color.accent
               }
 
+              // Folder Button (Opens meeting directory & closes panel)
+              Rectangle {
+                width: 82
+                height: 34
+                radius: 6
+                color: folHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 5
+                  Text { text: "󰉋"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.foreground }
+                  Text { text: "Folder"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.foreground }
+                }
+                ToolTip.visible: folHover.containsMouse
+                ToolTip.text: "Open recording folder in file manager"
+                ToolTip.delay: 300
+                MouseArea {
+                  id: folHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (root.currentReaderItem) {
+                      root.openFolder(root.currentReaderItem.folder)
+                      popupCard.open = false
+                    }
+                  }
+                }
+              }
+
+              // Open in App Button (Opens transcript in default local application & closes panel)
+              Rectangle {
+                width: 74
+                height: 34
+                radius: 6
+                color: edHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
+                RowLayout {
+                  anchors.centerIn: parent
+                  spacing: 5
+                  Text { text: "󰏫"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13; color: Color.foreground }
+                  Text { text: "Open"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.foreground }
+                }
+                ToolTip.visible: edHover.containsMouse
+                ToolTip.text: "Open transcript in default local application"
+                ToolTip.delay: 300
+                MouseArea {
+                  id: edHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (root.currentReaderItem) {
+                      var fp = root.currentReaderItem.transcript_file || root.currentReaderItem.audio_file
+                      root.openInEditor(fp)
+                      popupCard.open = false
+                    }
+                  }
+                }
+              }
+
               // Re-transcribe Button
               Rectangle {
-                width: 120
+                width: 116
                 height: 34
                 radius: 6
                 color: retransHover.containsMouse ? Util.alpha(Color.foreground, 0.15) : Util.alpha(Color.foreground, 0.08)
@@ -1366,7 +1369,7 @@ BarWidget {
 
               // Copy Button
               Rectangle {
-                width: 86
+                width: 74
                 height: 34
                 radius: 6
                 color: Util.alpha(Color.foreground, 0.08)
@@ -1394,7 +1397,7 @@ BarWidget {
 
               // Gemini Web Button (1-Click Copy Prompt & Launch Gemini Web)
               Rectangle {
-                width: 130
+                width: 116
                 height: 34
                 radius: 6
                 color: geminiHover.containsMouse ? Util.alpha(Color.accent, 0.32) : Util.alpha(Color.accent, 0.18)
@@ -1402,8 +1405,8 @@ BarWidget {
                 border.color: Color.accent
                 RowLayout {
                   anchors.centerIn: parent
-                  spacing: 6
-                  Text { text: "✦"; font.pixelSize: 14; font.bold: true; color: Color.accent }
+                  spacing: 5
+                  Text { text: "✦"; font.pixelSize: 13; font.bold: true; color: Color.accent }
                   Text { text: "Gemini Web"; font.family: "JetBrainsMono Nerd Font"; font.bold: true; font.pixelSize: 11; color: Color.accent }
                 }
                 ToolTip.visible: geminiHover.containsMouse
@@ -1590,7 +1593,10 @@ BarWidget {
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.openFolder()
+                  onClicked: {
+                    root.openFolder()
+                    popupCard.open = false
+                  }
                 }
               }
             }

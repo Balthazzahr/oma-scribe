@@ -739,13 +739,14 @@ def sanitize_whisper_prompt(raw_text):
 def normalize_dialogue_line(pl, default_speaker="Unknown Speaker"):
     """Normalizes any dialogue line strictly to: [TIME] - SPEAKER - Spoken words"""
     pl = pl.strip()
-    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*-\s*([^-]+?)\s*-\s*(.+)$", pl)
+    # Match [TIME] - Speaker Name - Spoken text (allowing hyphens in spoken text)
+    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*-\s*([A-Za-z\s\(\)\'\.\/]+?)\s*-\s*(.+)$", pl)
     if m and m.group(2).strip() and m.group(3).strip():
         return f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}"
-    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*:\s*(.+)$", pl)
+    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([A-Za-z\s\(\)\'\.\/]+?)\s*:\s*(.+)$", pl)
     if m and m.group(2).strip() and m.group(3).strip():
         return f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}"
-    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([^-:]+?)\s*-\s*(.+)$", pl)
+    m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*([A-Za-z\s\(\)\'\.\/]+?)\s*-\s*(.+)$", pl)
     if m and m.group(2).strip() and m.group(3).strip():
         return f"{m.group(1)} - {m.group(2).strip()} - {m.group(3).strip()}"
     m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*(.+)$", pl)
@@ -753,11 +754,53 @@ def normalize_dialogue_line(pl, default_speaker="Unknown Speaker"):
         return f"{m.group(1)} - {default_speaker} - {m.group(2).strip()}"
     return pl
 
+def merge_consecutive_speaker_turns(text):
+    """
+    Merges consecutive dialogue snippets from the same speaker into a single coherent paragraph,
+    retaining the starting timestamp and speaker label.
+    """
+    if not text or not text.strip():
+        return text
+
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    merged = []
+    current_speaker = None
+    current_time = None
+    current_texts = []
+
+    for line in lines:
+        m = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\])\s*-\s*([A-Za-z\s\(\)\'\.\/]+?)\s*-\s*(.+)$", line)
+        if m:
+            ts, speaker, text_part = m.group(1), m.group(2).strip(), m.group(3).strip()
+            if speaker == current_speaker and current_speaker is not None:
+                current_texts.append(text_part)
+            else:
+                if current_speaker is not None and current_texts:
+                    combined_text = " ".join(current_texts)
+                    merged.append(f"{current_time} - {current_speaker} - {combined_text}")
+                current_speaker = speaker
+                current_time = ts
+                current_texts = [text_part]
+        else:
+            if current_speaker is not None and current_texts:
+                combined_text = " ".join(current_texts)
+                merged.append(f"{current_time} - {current_speaker} - {combined_text}")
+                current_speaker = None
+                current_time = None
+                current_texts = []
+            merged.append(line)
+
+    if current_speaker is not None and current_texts:
+        combined_text = " ".join(current_texts)
+        merged.append(f"{current_time} - {current_speaker} - {combined_text}")
+
+    return "\n\n".join(merged)
+
 def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
     """
     Takes timestamped Whisper output ([MM:SS] Text) and formats strictly as:
     [TIME] - SPEAKER - Spoken text
-    Assigns speaker names from attendees_meta (making best guess).
+    Assigns speaker names based on confidence threshold and merges consecutive turns.
     """
     if not raw_transcript or not raw_transcript.strip():
         return raw_transcript
@@ -769,7 +812,8 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
             if not line:
                 continue
             formatted_lines.append(normalize_dialogue_line(line, "Unknown Speaker"))
-        return "\n".join(formatted_lines)
+        raw_combined = "\n".join(formatted_lines)
+        return merge_consecutive_speaker_turns(raw_combined)
 
     # Format attendee guidance for LLM
     if isinstance(attendees_meta, list):
@@ -785,26 +829,28 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
         att_str = str(attendees_meta).strip()
 
     if not att_str or "AttendeeONE" in att_str:
-        return raw_transcript
+        return merge_consecutive_speaker_turns(raw_transcript)
 
     lines = [l.strip() for l in raw_transcript.split("\n") if l.strip()]
     if not lines:
         return raw_transcript
 
-    # Chunk lines into batches of ~35 lines (~2,500 chars) for reliable attribution
-    batch_size = 35
+    # Chunk lines into batches of ~25 lines (~2,000 chars) for reliable attribution
+    batch_size = 25
     batches = [lines[i:i+batch_size] for i in range(0, len(lines), batch_size)]
     attributed_lines = []
 
     sys_prompt = (
-        "You are an audio diarization and speaker attribution expert.\n"
-        "Your task is to take a timestamped transcript and attribute EVERY single line to the most likely speaker from the provided attendee list.\n\n"
-        "CRITICAL ATTRIBUTION RULES:\n"
-        "1. You MUST attribute each line to one of the provided attendee names. Make your best guess based on conversational flow, tone, and spoken context.\n"
-        "2. Every single line MUST strictly follow the exact format: [TIME] - Speaker Name - Spoken text\n"
+        "You are an expert audio diarization and speaker attribution specialist.\n"
+        "Your task is to take a timestamped transcript and attribute each dialogue turn to the correct speaker "
+        "using conversational context, address cues (e.g., 'Hi Dave', 'Thanks Roxanne'), speaking flow, and the attendee list.\n\n"
+        "CONFIDENCE RULES & ATTRIBUTION GUIDELINES:\n"
+        "1. STRICT CONFIDENCE THRESHOLD: Only assign a specific attendee's name if you are confident based on context, direct address, or conversational roles.\n"
+        "2. If you are uncertain or if an unlisted participant speaks, attribute them as 'Unknown Male Speaker' or 'Unknown Female Speaker' (or 'Unknown Speaker'). Do NOT guess or force-assign names without clear context.\n"
+        "3. Every line MUST follow the exact format: [TIME] - Speaker Name - Spoken text\n"
         "   Example: [00:21] - Toni Criminello - It's disruptive. It's very disruptive for the team.\n"
-        "3. Preserve all verbatim spoken words and exact timestamps. Do NOT summarize or drop any lines.\n"
-        "4. Do NOT output any thinking, intro, markdown headers, or explanation. Start line 1 immediately with the first timestamp."
+        "4. Preserve all verbatim spoken words and exact timestamps without omitting or summarizing.\n"
+        "5. Output ONLY the timestamped dialogue lines without any preamble, reasoning, or markdown headers."
     )
 
     models_to_try = [
@@ -824,7 +870,7 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
                 ],
                 api_key=api_key,
                 model_list=models_to_try,
-                max_tokens=700
+                max_tokens=1500
             )
             clean_res = res.strip()
             # Extract ONLY valid timestamped dialogue lines
@@ -847,7 +893,8 @@ def attribute_speakers_in_transcript(raw_transcript, attendees_meta, api_key):
         if idx < len(batches) - 1:
             time.sleep(1.0)
 
-    return "\n".join(attributed_lines).strip()
+    unmerged_raw = "\n".join(attributed_lines).strip()
+    return merge_consecutive_speaker_turns(unmerged_raw)
 
 def prepare_gemini_prompt_and_open(transcript_path, title="", attendees=""):
     """
